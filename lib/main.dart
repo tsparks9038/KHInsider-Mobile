@@ -1,0 +1,512 @@
+import 'dart:async';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+import 'package:html/parser.dart' as html_parser;
+import 'package:flutter/foundation.dart'; // for compute()
+
+void main() => runApp(const SearchApp());
+
+class SearchApp extends StatelessWidget {
+  const SearchApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const MaterialApp(home: SearchScreen());
+  }
+}
+
+class SearchScreen extends StatefulWidget {
+  const SearchScreen({super.key});
+
+  @override
+  State<SearchScreen> createState() => _SearchScreenState();
+}
+
+class _SearchScreenState extends State<SearchScreen> {
+  final TextEditingController _controller = TextEditingController();
+  final http.Client _httpClient = http.Client();
+
+  List<Album> _albums = [];
+  Album? _selectedAlbum;
+  List<Song> _songs = [];
+
+  AudioPlayer _player = AudioPlayer();
+  String? _currentSongUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _player.setReleaseMode(ReleaseMode.stop);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _httpClient.close();
+    _player.dispose();
+    super.dispose();
+  }
+
+  Future<void> _handleSubmitted(String text) async {
+    final formattedText = text.replaceAll(' ', '+');
+    final url = Uri.parse(
+      'https://downloads.khinsider.com/search?search=$formattedText',
+    );
+
+    try {
+      final response = await _httpClient.get(url);
+      if (response.statusCode == 200) {
+        final albums = await compute(parseAlbumList, response.body);
+        setState(() {
+          _albums = albums;
+        });
+      } else {
+        debugPrint('Server error: ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint("Error occurred: $e");
+    }
+  }
+
+  Future<void> _fetchAlbumPage(String albumUrl) async {
+    final fullUrl = 'https://downloads.khinsider.com$albumUrl';
+    try {
+      final response = await _httpClient.get(Uri.parse(fullUrl));
+      if (response.statusCode == 200) {
+        final imageUrl = _getHighResImageUrl(
+          html_parser
+                  .parse(response.body)
+                  .querySelector('.albumImage img')
+                  ?.attributes['src'] ??
+              '',
+        );
+
+        setState(() {
+          _selectedAlbum = _selectedAlbum?.copyWith(imageUrl: imageUrl);
+        });
+
+        final songs = await compute(parseSongList, response.body);
+        setState(() {
+          _songs = songs;
+        });
+      } else {
+        debugPrint('Error: ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('Error occurred while fetching album page: $e');
+    }
+  }
+
+  String _getHighResImageUrl(String url) {
+    return url.replaceFirst('/thumbs/', '/');
+  }
+
+  Future<void> _fetchActualMp3Url(String detailPageUrl) async {
+    try {
+      final response = await _httpClient.get(Uri.parse(detailPageUrl));
+      if (response.statusCode == 200) {
+        final document = html_parser.parse(response.body);
+        final mp3Anchor = document
+            .querySelectorAll('a')
+            .firstWhere(
+              (a) => a.attributes['href']?.endsWith('.mp3') ?? false,
+              orElse: () => throw Exception('MP3 link not found'),
+            );
+
+        final mp3Link = mp3Anchor.attributes['href'];
+
+        if (mp3Link != null) {
+          final fullMp3Link =
+              mp3Link.startsWith('http')
+                  ? mp3Link
+                  : 'https://downloads.khinsider.com$mp3Link';
+
+          debugPrint('Playing MP3: $fullMp3Link');
+          await _player.setSource(UrlSource(fullMp3Link));
+          await _player.resume();
+          setState(() {
+            _currentSongUrl = fullMp3Link;
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('Error fetching MP3 URL: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('KHInsider Search')),
+      body: WillPopScope(
+        onWillPop: () async {
+          if (_selectedAlbum != null) {
+            setState(() {
+              _selectedAlbum = null;
+              _songs = [];
+            });
+            return false;
+          }
+          return true;
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            children: [
+              if (_selectedAlbum == null) ...[
+                TextField(
+                  controller: _controller,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z0-9 ]')),
+                  ],
+                  onSubmitted: _handleSubmitted,
+                  decoration: const InputDecoration(
+                    hintText: 'Search...',
+                    prefixIcon: Icon(Icons.search),
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
+              Expanded(
+                child:
+                    _selectedAlbum == null
+                        ? ListView.builder(
+                          itemCount: _albums.length,
+                          itemBuilder: (context, index) {
+                            final album = _albums[index];
+                            return ListTile(
+                              leading:
+                                  album.imageUrl.isNotEmpty
+                                      ? CircleAvatar(
+                                        backgroundImage: NetworkImage(
+                                          album.imageUrl,
+                                        ),
+                                        radius: 30,
+                                      )
+                                      : const CircleAvatar(
+                                        backgroundColor: Colors.grey,
+                                        radius: 30,
+                                        child: Icon(
+                                          Icons.music_note,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                              title: Text(album.albumName),
+                              subtitle: Text(
+                                '${album.type} - ${album.year} | ${album.platform}',
+                              ),
+                              onTap: () {
+                                setState(() {
+                                  _selectedAlbum = album;
+                                });
+                                _fetchAlbumPage(album.albumUrl);
+                              },
+                            );
+                          },
+                        )
+                        : ListView(
+                          children: [
+                            const SizedBox(height: 16),
+                            Center(
+                              child:
+                                  _selectedAlbum!.imageUrl.isNotEmpty
+                                      ? ClipRRect(
+                                        borderRadius: BorderRadius.circular(8),
+                                        child: Image.network(
+                                          _selectedAlbum!.imageUrl,
+                                          width: 200,
+                                          height: 200,
+                                          fit: BoxFit.cover,
+                                        ),
+                                      )
+                                      : Container(
+                                        width: 200,
+                                        height: 200,
+                                        color: Colors.grey[300],
+                                        child: const Icon(
+                                          Icons.music_note,
+                                          size: 100,
+                                        ),
+                                      ),
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              _selectedAlbum!.albumName,
+                              style: const TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '${_selectedAlbum!.type} - ${_selectedAlbum!.year} | ${_selectedAlbum!.platform}',
+                              style: const TextStyle(color: Colors.grey),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 24),
+                            ..._songs.map(
+                              (song) => ListTile(
+                                title: Text(song.songName),
+                                subtitle: Text(song.runtime),
+                                onTap: () => _fetchActualMp3Url(song.audioUrl),
+                              ),
+                            ),
+                          ],
+                        ),
+              ),
+              if (_currentSongUrl != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: PlayerWidget(player: _player),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ========== Parsing Functions for compute() ==========
+
+List<Album> parseAlbumList(String htmlBody) {
+  final document = html_parser.parse(htmlBody);
+  final rows = document.querySelectorAll('table.albumList tbody tr');
+
+  return rows
+      .map((row) {
+        final cols = row.querySelectorAll('td');
+        if (cols.length < 5) return null;
+
+        final albumName =
+            (cols[1].querySelector('a')?.text.trim() ?? '') +
+            ' ' +
+            (cols[1].querySelector('span')?.text.trim() ?? '');
+        final platform = cols[2].text.trim();
+        final type = cols[3].text.trim();
+        final year = cols[4].text.trim();
+        final imageUrl = cols[0].querySelector('img')?.attributes['src'] ?? '';
+        final albumUrl = cols[1].querySelector('a')?.attributes['href'] ?? '';
+
+        return Album(
+          albumName.trim(),
+          platform,
+          type,
+          year,
+          imageUrl,
+          albumUrl,
+        );
+      })
+      .whereType<Album>()
+      .toList();
+}
+
+List<Song> parseSongList(String htmlBody) {
+  final document = html_parser.parse(htmlBody);
+  final rows = document.querySelectorAll('#songlist tr');
+
+  return rows
+      .map((row) {
+        final links = row.querySelectorAll('a');
+        if (links.length < 2) return null;
+
+        final name = links[0].text.trim();
+        final runtime = links[1].text.trim();
+        final href = links[0].attributes['href'];
+
+        if (href != null && name.isNotEmpty && runtime.isNotEmpty) {
+          return Song(name, runtime, 'https://downloads.khinsider.com$href');
+        }
+        return null;
+      })
+      .whereType<Song>()
+      .toList();
+}
+
+// ========== Models ==========
+
+class Album {
+  final String albumName;
+  final String platform;
+  final String type;
+  final String year;
+  final String imageUrl;
+  final String albumUrl;
+
+  Album(
+    this.albumName,
+    this.platform,
+    this.type,
+    this.year,
+    this.imageUrl,
+    this.albumUrl,
+  );
+
+  Album copyWith({String? imageUrl}) {
+    return Album(
+      albumName,
+      platform,
+      type,
+      year,
+      imageUrl ?? this.imageUrl,
+      albumUrl,
+    );
+  }
+}
+
+class Song {
+  final String songName;
+  final String runtime;
+  final String audioUrl;
+
+  Song(this.songName, this.runtime, this.audioUrl);
+}
+
+// ========== Player Widget ==========
+
+class PlayerWidget extends StatefulWidget {
+  final AudioPlayer player;
+
+  const PlayerWidget({required this.player, super.key});
+
+  @override
+  State<StatefulWidget> createState() => _PlayerWidgetState();
+}
+
+class _PlayerWidgetState extends State<PlayerWidget> {
+  PlayerState? _playerState;
+  Duration? _duration;
+  Duration? _position;
+
+  StreamSubscription? _durationSubscription;
+  StreamSubscription? _positionSubscription;
+  StreamSubscription? _playerCompleteSubscription;
+  StreamSubscription? _playerStateChangeSubscription;
+
+  bool get _isPlaying => _playerState == PlayerState.playing;
+  bool get _isPaused => _playerState == PlayerState.paused;
+  String get _durationText => _duration?.toString().split('.').first ?? '';
+  String get _positionText => _position?.toString().split('.').first ?? '';
+  AudioPlayer get player => widget.player;
+
+  @override
+  void initState() {
+    super.initState();
+    _playerState = player.state;
+    player.getDuration().then((value) => setState(() => _duration = value));
+    player.getCurrentPosition().then(
+      (value) => setState(() => _position = value),
+    );
+    _initStreams();
+  }
+
+  @override
+  void setState(VoidCallback fn) {
+    if (mounted) super.setState(fn);
+  }
+
+  @override
+  void dispose() {
+    _durationSubscription?.cancel();
+    _positionSubscription?.cancel();
+    _playerCompleteSubscription?.cancel();
+    _playerStateChangeSubscription?.cancel();
+    super.dispose();
+  }
+
+  void _initStreams() {
+    _durationSubscription = player.onDurationChanged.listen(
+      (d) => setState(() => _duration = d),
+    );
+    _positionSubscription = player.onPositionChanged.listen(
+      (p) => setState(() => _position = p),
+    );
+    _playerCompleteSubscription = player.onPlayerComplete.listen((_) {
+      setState(() {
+        _playerState = PlayerState.stopped;
+        _position = Duration.zero;
+      });
+    });
+    _playerStateChangeSubscription = player.onPlayerStateChanged.listen((
+      state,
+    ) {
+      setState(() => _playerState = state);
+    });
+  }
+
+  Future<void> _play() async {
+    await player.resume();
+  }
+
+  Future<void> _pause() async {
+    await player.pause();
+  }
+
+  Future<void> _stop() async {
+    await player.stop();
+    setState(() {
+      _playerState = PlayerState.stopped;
+      _position = Duration.zero;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Theme.of(context).primaryColor;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              onPressed: _isPlaying ? null : _play,
+              iconSize: 48.0,
+              icon: const Icon(Icons.play_arrow),
+              color: color,
+            ),
+            IconButton(
+              onPressed: _isPlaying ? _pause : null,
+              iconSize: 48.0,
+              icon: const Icon(Icons.pause),
+              color: color,
+            ),
+            IconButton(
+              onPressed: _isPlaying || _isPaused ? _stop : null,
+              iconSize: 48.0,
+              icon: const Icon(Icons.stop),
+              color: color,
+            ),
+          ],
+        ),
+        Slider(
+          onChanged: (value) {
+            final duration = _duration;
+            if (duration == null) return;
+            final position = value * duration.inMilliseconds;
+            player.seek(Duration(milliseconds: position.round()));
+          },
+          value:
+              (_position != null &&
+                      _duration != null &&
+                      _position!.inMilliseconds > 0 &&
+                      _position!.inMilliseconds < _duration!.inMilliseconds)
+                  ? _position!.inMilliseconds / _duration!.inMilliseconds
+                  : 0.0,
+        ),
+        Text(
+          _position != null
+              ? '$_positionText / $_durationText'
+              : _duration != null
+              ? _durationText
+              : '',
+          style: const TextStyle(fontSize: 16.0),
+        ),
+      ],
+    );
+  }
+}
