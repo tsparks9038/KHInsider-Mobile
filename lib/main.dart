@@ -32,7 +32,7 @@ class _SearchScreenState extends State<SearchScreen> {
   Album? _selectedAlbum;
   List<Song> _songs = [];
 
-  AudioPlayer _player = AudioPlayer();
+  final AudioPlayer _player = AudioPlayer();
   String? _currentSongUrl;
 
   @override
@@ -283,9 +283,7 @@ List<Album> parseAlbumList(String htmlBody) {
         if (cols.length < 5) return null;
 
         final albumName =
-            (cols[1].querySelector('a')?.text.trim() ?? '') +
-            ' ' +
-            (cols[1].querySelector('span')?.text.trim() ?? '');
+            '${cols[1].querySelector('a')?.text.trim() ?? ''} ${cols[1].querySelector('span')?.text.trim() ?? ''}';
         final platform = cols[2].text.trim();
         final type = cols[3].text.trim();
         final year = cols[4].text.trim();
