@@ -479,6 +479,34 @@ class _PlayerWidgetState extends State<PlayerWidget> {
     });
   }
 
+  void _rewind() {
+    if (_position != null && _position! > const Duration(seconds: 3)) {
+      player.seek(Duration.zero);
+    } else {
+      final parent = context.findAncestorStateOfType<_SearchScreenState>();
+      if (parent != null && parent._currentSongIndex > 0) {
+        parent.setState(() {
+          parent._currentSongIndex--;
+        });
+        parent._fetchActualMp3Url(
+          parent._songs[parent._currentSongIndex].audioUrl,
+        );
+      }
+    }
+  }
+
+  void _skip() {
+    final parent = context.findAncestorStateOfType<_SearchScreenState>();
+    if (parent != null && parent._currentSongIndex < parent._songs.length - 1) {
+      parent.setState(() {
+        parent._currentSongIndex++;
+      });
+      parent._fetchActualMp3Url(
+        parent._songs[parent._currentSongIndex].audioUrl,
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final color = Theme.of(context).primaryColor;
@@ -488,6 +516,12 @@ class _PlayerWidgetState extends State<PlayerWidget> {
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            IconButton(
+              onPressed: _rewind,
+              iconSize: 40.0,
+              icon: const Icon(Icons.skip_previous),
+              color: color,
+            ),
             IconButton(
               onPressed: _isPlaying ? null : _play,
               iconSize: 48.0,
@@ -504,6 +538,12 @@ class _PlayerWidgetState extends State<PlayerWidget> {
               onPressed: _isPlaying || _isPaused ? _stop : null,
               iconSize: 48.0,
               icon: const Icon(Icons.stop),
+              color: color,
+            ),
+            IconButton(
+              onPressed: _skip,
+              iconSize: 40.0,
+              icon: const Icon(Icons.skip_next),
               color: color,
             ),
           ],
