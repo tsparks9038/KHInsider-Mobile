@@ -25,6 +25,7 @@ class SearchScreen extends StatefulWidget {
 }
 
 class _SearchScreenState extends State<SearchScreen> {
+  final TextEditingController _searchController = TextEditingController();
   final TextEditingController _controller = TextEditingController();
   final http.Client _httpClient = http.Client();
 
@@ -36,6 +37,8 @@ class _SearchScreenState extends State<SearchScreen> {
   String? _currentSongUrl;
   int _currentSongIndex = 0; // Index of the currently playing song
 
+  bool _isPlayerExpanded = false;
+
   @override
   void initState() {
     super.initState();
@@ -45,6 +48,34 @@ class _SearchScreenState extends State<SearchScreen> {
     _player.onPlayerComplete.listen((_) {
       _playNextSong();
     });
+  }
+
+  void _searchAlbums(String query) async {
+    if (query.isEmpty) {
+      setState(() {
+        _albums = [];
+      });
+      return;
+    }
+
+    final formattedText = query.replaceAll(' ', '+');
+    final url = Uri.parse(
+      'https://downloads.khinsider.com/search?search=$formattedText',
+    );
+
+    try {
+      final response = await _httpClient.get(url);
+      if (response.statusCode == 200) {
+        final albums = await compute(parseAlbumList, response.body);
+        setState(() {
+          _albums = albums;
+        });
+      } else {
+        debugPrint('Server error: ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint("Error occurred: $e");
+    }
   }
 
   // Method to play the next song in the list
@@ -240,55 +271,147 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
+  Widget _buildExpandedPlayer() {
+    final song = _songs[_currentSongIndex];
+
+    return Material(
+      elevation: 12,
+      color: Colors.white,
+      child: Container(
+        height: MediaQuery.of(context).size.height * 0.6,
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Align(
+              alignment: Alignment.topRight,
+              child: IconButton(
+                icon: const Icon(Icons.keyboard_arrow_down),
+                onPressed: () => setState(() => _isPlayerExpanded = false),
+              ),
+            ),
+            if (_selectedAlbum?.imageUrl.isNotEmpty == true)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Image.network(
+                  _selectedAlbum!.imageUrl,
+                  width: 200,
+                  height: 200,
+                  fit: BoxFit.cover,
+                ),
+              ),
+            const SizedBox(height: 20),
+            Text(
+              song.songName,
+              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            PlayerWidget(player: _player),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMiniPlayer() {
+    final song = _songs.isNotEmpty ? _songs[_currentSongIndex] : null;
+
+    return Material(
+      elevation: 6,
+      color: Colors.white,
+      child: InkWell(
+        onTap: () => setState(() => _isPlayerExpanded = true),
+        child: Container(
+          height: 70,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
+            children: [
+              if (_selectedAlbum?.imageUrl.isNotEmpty == true)
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: Image.network(
+                    _selectedAlbum!.imageUrl,
+                    width: 50,
+                    height: 50,
+                    fit: BoxFit.cover,
+                  ),
+                ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  song?.songName ?? 'Playing...',
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 16),
+                ),
+              ),
+              IconButton(
+                icon: Icon(
+                  _player.state == PlayerState.playing
+                      ? Icons.pause
+                      : Icons.play_arrow,
+                ),
+                onPressed: () {
+                  if (_player.state == PlayerState.playing) {
+                    _player.pause();
+                  } else {
+                    _player.resume();
+                  }
+                },
+              ),
+              IconButton(
+                icon: const Icon(Icons.keyboard_arrow_up),
+                onPressed: () => setState(() => _isPlayerExpanded = true),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('KHInsider Search')),
-      body: PopScope(
-        canPop: true,
-        onPopInvokedWithResult: (didPop, result) async {
-          if (_selectedAlbum != null) {
-            setState(() {
-              _selectedAlbum = null;
-              _songs = [];
-            });
-            return;
-          }
-          return;
-        },
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            children: [
-              if (_selectedAlbum == null) ...[
-                TextField(
-                  controller: _controller,
-                  inputFormatters: [
-                    FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z0-9 ]')),
-                  ],
-                  onSubmitted: _handleSubmitted,
-                  decoration: const InputDecoration(
-                    hintText: 'Search...',
-                    prefixIcon: Icon(Icons.search),
-                    border: OutlineInputBorder(),
+      body: Stack(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              children: [
+                if (_selectedAlbum == null) ...[
+                  TextField(
+                    controller: _searchController,
+                    decoration: const InputDecoration(
+                      labelText: 'Search Albums',
+                      border: OutlineInputBorder(),
+                    ),
+                    onChanged: (value) => _searchAlbums(value),
                   ),
+                  const SizedBox(height: 16),
+                ],
+                Expanded(
+                  child:
+                      _selectedAlbum == null
+                          ? _buildAlbumList()
+                          : _buildSongList(),
                 ),
-                const SizedBox(height: 16),
               ],
-              Expanded(
-                child:
-                    _selectedAlbum == null
-                        ? _buildAlbumList()
-                        : _buildSongList(),
-              ),
-              if (_currentSongUrl != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: PlayerWidget(player: _player),
-                ),
-            ],
+            ),
           ),
-        ),
+          if (_currentSongUrl != null)
+            Align(
+              alignment: Alignment.bottomCenter,
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 300),
+                child:
+                    _isPlayerExpanded
+                        ? _buildExpandedPlayer()
+                        : _buildMiniPlayer(),
+              ),
+            ),
+        ],
       ),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: 0,
@@ -301,6 +424,46 @@ class _SearchScreenState extends State<SearchScreen> {
             icon: Icon(Icons.favorite),
             label: 'Favorites',
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class FullScreenPlayerScreen extends StatelessWidget {
+  final AudioPlayer player;
+  final String songName;
+  final String albumName;
+  final String albumArtUrl;
+
+  const FullScreenPlayerScreen({
+    required this.player,
+    required this.songName,
+    required this.albumName,
+    required this.albumArtUrl,
+    super.key,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(albumName)),
+      body: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Image.network(
+            albumArtUrl,
+            width: 250,
+            height: 250,
+            fit: BoxFit.cover,
+          ),
+          const SizedBox(height: 20),
+          Text(
+            songName,
+            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 20),
+          PlayerWidget(player: player),
         ],
       ),
     );
