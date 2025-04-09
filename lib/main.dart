@@ -34,12 +34,65 @@ class _SearchScreenState extends State<SearchScreen> {
 
   final AudioPlayer _player = AudioPlayer();
   String? _currentSongUrl;
+  int _currentSongIndex = 0; // Index of the currently playing song
 
   @override
   void initState() {
     super.initState();
     _player.setReleaseMode(ReleaseMode.stop);
+
+    // Set up the listener for when a song completes
+    _player.onPlayerComplete.listen((_) {
+      _playNextSong();
+    });
   }
+
+  // Method to play the next song in the list
+  void _playNextSong() {
+    if (_currentSongIndex < _songs.length - 1) {
+      _currentSongIndex++;
+      _fetchActualMp3Url(_songs[_currentSongIndex].audioUrl);
+    } else {
+      // Reset the index or handle the end of the playlist as needed
+      debugPrint('End of playlist reached.');
+    }
+  }
+
+  // Updated method to fetch and play a song by its URL
+  Future<void> _fetchActualMp3Url(String detailPageUrl) async {
+    try {
+      final response = await _httpClient.get(Uri.parse(detailPageUrl));
+      if (response.statusCode == 200) {
+        final document = html_parser.parse(response.body);
+        final mp3Anchor = document
+            .querySelectorAll('a')
+            .firstWhere(
+              (a) => a.attributes['href']?.endsWith('.mp3') ?? false,
+              orElse: () => throw Exception('MP3 link not found'),
+            );
+
+        final mp3Link = mp3Anchor.attributes['href'];
+
+        if (mp3Link != null) {
+          final fullMp3Link =
+              mp3Link.startsWith('http')
+                  ? mp3Link
+                  : 'https://downloads.khinsider.com$mp3Link';
+
+          debugPrint('Playing MP3: $fullMp3Link');
+          await _player.setSource(UrlSource(fullMp3Link));
+          await _player.resume();
+          setState(() {
+            _currentSongUrl = fullMp3Link;
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('Error fetching MP3 URL: $e');
+    }
+  }
+
+  // Ensure that when a song is selected from the list, the correct index is set
 
   @override
   void dispose() {
@@ -101,39 +154,6 @@ class _SearchScreenState extends State<SearchScreen> {
 
   String _getHighResImageUrl(String url) {
     return url.replaceFirst('/thumbs/', '/');
-  }
-
-  Future<void> _fetchActualMp3Url(String detailPageUrl) async {
-    try {
-      final response = await _httpClient.get(Uri.parse(detailPageUrl));
-      if (response.statusCode == 200) {
-        final document = html_parser.parse(response.body);
-        final mp3Anchor = document
-            .querySelectorAll('a')
-            .firstWhere(
-              (a) => a.attributes['href']?.endsWith('.mp3') ?? false,
-              orElse: () => throw Exception('MP3 link not found'),
-            );
-
-        final mp3Link = mp3Anchor.attributes['href'];
-
-        if (mp3Link != null) {
-          final fullMp3Link =
-              mp3Link.startsWith('http')
-                  ? mp3Link
-                  : 'https://downloads.khinsider.com$mp3Link';
-
-          debugPrint('Playing MP3: $fullMp3Link');
-          await _player.setSource(UrlSource(fullMp3Link));
-          await _player.resume();
-          setState(() {
-            _currentSongUrl = fullMp3Link;
-          });
-        }
-      }
-    } catch (e) {
-      debugPrint('Error fetching MP3 URL: $e');
-    }
   }
 
   @override
@@ -248,13 +268,20 @@ class _SearchScreenState extends State<SearchScreen> {
                               textAlign: TextAlign.center,
                             ),
                             const SizedBox(height: 24),
-                            ..._songs.map(
-                              (song) => ListTile(
+                            ..._songs.asMap().entries.map((entry) {
+                              final index = entry.key;
+                              final song = entry.value;
+                              return ListTile(
                                 title: Text(song.songName),
                                 subtitle: Text(song.runtime),
-                                onTap: () => _fetchActualMp3Url(song.audioUrl),
-                              ),
-                            ),
+                                onTap: () {
+                                  setState(() {
+                                    _currentSongIndex = index;
+                                  });
+                                  _fetchActualMp3Url(song.audioUrl);
+                                },
+                              );
+                            }),
                           ],
                         ),
               ),
