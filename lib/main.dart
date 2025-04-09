@@ -160,16 +160,21 @@ class _SearchScreenState extends State<SearchScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('KHInsider Search')),
-      body: WillPopScope(
-        onWillPop: () async {
+      body: PopScope(
+        canPop: true,
+        onPopInvokedWithResult: (didPop, result) async {
           if (_selectedAlbum != null) {
             setState(() {
               _selectedAlbum = null;
               _songs = [];
             });
-            return false;
+
+            // Cancel the pop by returning null
+            return;
           }
-          return true;
+
+          // Allow the pop by returning the original result
+          return;
         },
         child: Padding(
           padding: const EdgeInsets.all(16.0),
