@@ -156,6 +156,90 @@ class _SearchScreenState extends State<SearchScreen> {
     return url.replaceFirst('/thumbs/', '/');
   }
 
+  Widget _buildAlbumList() {
+    return ListView.builder(
+      itemCount: _albums.length,
+      itemBuilder: (context, index) {
+        final album = _albums[index];
+        return ListTile(
+          leading:
+              album.imageUrl.isNotEmpty
+                  ? CircleAvatar(
+                    backgroundImage: NetworkImage(album.imageUrl),
+                    radius: 30,
+                  )
+                  : const CircleAvatar(
+                    backgroundColor: Colors.grey,
+                    radius: 30,
+                    child: Icon(Icons.music_note, color: Colors.white),
+                  ),
+          title: Text(album.albumName),
+          subtitle: Text('${album.type} - ${album.year} | ${album.platform}'),
+          onTap: () {
+            setState(() {
+              _selectedAlbum = album;
+            });
+            _fetchAlbumPage(album.albumUrl);
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildSongList() {
+    return ListView(
+      children: [
+        const SizedBox(height: 16),
+        Center(
+          child:
+              _selectedAlbum!.imageUrl.isNotEmpty
+                  ? ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.network(
+                      _selectedAlbum!.imageUrl,
+                      width: 200,
+                      height: 200,
+                      fit: BoxFit.cover,
+                    ),
+                  )
+                  : Container(
+                    width: 200,
+                    height: 200,
+                    color: Colors.grey[300],
+                    child: const Icon(Icons.music_note, size: 100),
+                  ),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          _selectedAlbum!.albumName,
+          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 4),
+        Text(
+          '${_selectedAlbum!.type} - ${_selectedAlbum!.year} | ${_selectedAlbum!.platform}',
+          style: const TextStyle(color: Colors.grey),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 24),
+        ..._songs.asMap().entries.map((entry) {
+          final index = entry.key;
+          final song = entry.value;
+          return ListTile(
+            title: Text(song.songName),
+            subtitle: Text(song.runtime),
+            onTap: () {
+              setState(() {
+                _currentSongIndex = index;
+              });
+              _fetchActualMp3Url(song.audioUrl);
+            },
+          );
+        }),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -168,12 +252,8 @@ class _SearchScreenState extends State<SearchScreen> {
               _selectedAlbum = null;
               _songs = [];
             });
-
-            // Cancel the pop by returning null
             return;
           }
-
-          // Allow the pop by returning the original result
           return;
         },
         child: Padding(
@@ -198,97 +278,8 @@ class _SearchScreenState extends State<SearchScreen> {
               Expanded(
                 child:
                     _selectedAlbum == null
-                        ? ListView.builder(
-                          itemCount: _albums.length,
-                          itemBuilder: (context, index) {
-                            final album = _albums[index];
-                            return ListTile(
-                              leading:
-                                  album.imageUrl.isNotEmpty
-                                      ? CircleAvatar(
-                                        backgroundImage: NetworkImage(
-                                          album.imageUrl,
-                                        ),
-                                        radius: 30,
-                                      )
-                                      : const CircleAvatar(
-                                        backgroundColor: Colors.grey,
-                                        radius: 30,
-                                        child: Icon(
-                                          Icons.music_note,
-                                          color: Colors.white,
-                                        ),
-                                      ),
-                              title: Text(album.albumName),
-                              subtitle: Text(
-                                '${album.type} - ${album.year} | ${album.platform}',
-                              ),
-                              onTap: () {
-                                setState(() {
-                                  _selectedAlbum = album;
-                                });
-                                _fetchAlbumPage(album.albumUrl);
-                              },
-                            );
-                          },
-                        )
-                        : ListView(
-                          children: [
-                            const SizedBox(height: 16),
-                            Center(
-                              child:
-                                  _selectedAlbum!.imageUrl.isNotEmpty
-                                      ? ClipRRect(
-                                        borderRadius: BorderRadius.circular(8),
-                                        child: Image.network(
-                                          _selectedAlbum!.imageUrl,
-                                          width: 200,
-                                          height: 200,
-                                          fit: BoxFit.cover,
-                                        ),
-                                      )
-                                      : Container(
-                                        width: 200,
-                                        height: 200,
-                                        color: Colors.grey[300],
-                                        child: const Icon(
-                                          Icons.music_note,
-                                          size: 100,
-                                        ),
-                                      ),
-                            ),
-                            const SizedBox(height: 12),
-                            Text(
-                              _selectedAlbum!.albumName,
-                              style: const TextStyle(
-                                fontSize: 20,
-                                fontWeight: FontWeight.bold,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              '${_selectedAlbum!.type} - ${_selectedAlbum!.year} | ${_selectedAlbum!.platform}',
-                              style: const TextStyle(color: Colors.grey),
-                              textAlign: TextAlign.center,
-                            ),
-                            const SizedBox(height: 24),
-                            ..._songs.asMap().entries.map((entry) {
-                              final index = entry.key;
-                              final song = entry.value;
-                              return ListTile(
-                                title: Text(song.songName),
-                                subtitle: Text(song.runtime),
-                                onTap: () {
-                                  setState(() {
-                                    _currentSongIndex = index;
-                                  });
-                                  _fetchActualMp3Url(song.audioUrl);
-                                },
-                              );
-                            }),
-                          ],
-                        ),
+                        ? _buildAlbumList()
+                        : _buildSongList(),
               ),
               if (_currentSongUrl != null)
                 Padding(
@@ -298,6 +289,19 @@ class _SearchScreenState extends State<SearchScreen> {
             ],
           ),
         ),
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: 0,
+        onTap: (index) {
+          // Handle tab switching if needed
+        },
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.search), label: 'Search'),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.favorite),
+            label: 'Favorites',
+          ),
+        ],
       ),
     );
   }
