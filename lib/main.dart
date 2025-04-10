@@ -1,10 +1,10 @@
 import 'dart:async';
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:html/parser.dart' as html_parser;
 import 'package:flutter/foundation.dart'; // for compute()
+import 'package:just_audio/just_audio.dart';
 
 void main() => runApp(const SearchApp());
 
@@ -32,7 +32,7 @@ class _SearchScreenState extends State<SearchScreen> {
   Album? _selectedAlbum;
   List<Song> _songs = [];
 
-  final AudioPlayer _player = AudioPlayer();
+  AudioPlayer _player = AudioPlayer();
   String? _currentSongUrl;
   int _currentSongIndex = 0; // Index of the currently playing song
 
@@ -41,11 +41,14 @@ class _SearchScreenState extends State<SearchScreen> {
   @override
   void initState() {
     super.initState();
-    _player.setReleaseMode(ReleaseMode.stop);
+    _player = AudioPlayer();
+    _player.setLoopMode(LoopMode.off);
 
     // Set up the listener for when a song completes
-    _player.onPlayerComplete.listen((_) {
-      _playNextSong();
+    _player.playerStateStream.listen((state) {
+      if (state.processingState == ProcessingState.completed) {
+        _playNextSong();
+      }
     });
   }
 
@@ -63,18 +66,25 @@ class _SearchScreenState extends State<SearchScreen> {
     }
   }
 
-  // Method to play the next song in the list
   void _playNextSong() {
-    if (_currentSongIndex < _songs.length - 1) {
-      _currentSongIndex++;
-      _fetchActualMp3Url(_songs[_currentSongIndex].audioUrl);
-    } else {
-      // Reset the index or handle the end of the playlist as needed
-      debugPrint('End of playlist reached.');
-    }
+    setState(() {
+      if (_currentSongIndex < _songs.length - 1) {
+        _currentSongIndex++;
+        _fetchActualMp3Url(_songs[_currentSongIndex].audioUrl);
+      }
+    });
   }
 
-  // Updated method to fetch and play a song by its URL
+  void _playPause() {
+    setState(() {
+      if (_player.playing) {
+        _player.pause();
+      } else {
+        _player.play();
+      }
+    });
+  }
+
   Future<void> _fetchActualMp3Url(String detailPageUrl) async {
     try {
       final response = await _httpClient.get(Uri.parse(detailPageUrl));
@@ -87,25 +97,22 @@ class _SearchScreenState extends State<SearchScreen> {
               orElse: () => throw Exception('MP3 link not found'),
             );
 
-        final mp3Link = mp3Anchor.attributes['href'];
-
-        if (mp3Link != null) {
-          final fullMp3Link =
-              mp3Link.startsWith('http')
-                  ? mp3Link
-                  : 'https://downloads.khinsider.com$mp3Link';
-
-          debugPrint('Playing MP3: $fullMp3Link');
-          await _player.setSource(UrlSource(fullMp3Link));
-          await _player.resume();
-          setState(() {
-            _currentSongUrl = fullMp3Link;
-          });
-        }
+        final mp3Link = mp3Anchor.attributes['href']!;
+        await _player.setUrl(mp3Link); // Play the audio from the fetched URL
+        _player.play(); // Start playback
+      } else {
+        throw Exception('Failed to load MP3 URL');
       }
     } catch (e) {
-      debugPrint('Error fetching MP3 URL: $e');
+      debugPrint('Error: $e');
     }
+  }
+
+  // Format a Duration object into a readable string (e.g., "mm:ss")
+  String _formatDuration(Duration duration) {
+    final minutes = duration.inMinutes;
+    final seconds = duration.inSeconds % 60;
+    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
   }
 
   // Ensure that when a song is selected from the list, the correct index is set
@@ -237,6 +244,9 @@ class _SearchScreenState extends State<SearchScreen> {
             onTap: () {
               setState(() {
                 _currentSongIndex = index;
+                _currentSongUrl = song.audioUrl; // Set the current song URL
+                _isPlayerExpanded =
+                    false; // Ensure the mini player is shown after selection
               });
               _fetchActualMp3Url(song.audioUrl);
             },
@@ -260,10 +270,9 @@ class _SearchScreenState extends State<SearchScreen> {
           top: 40,
           left: 20,
           right: 20,
-          bottom: 20,
+          bottom: 40, // Adjusted padding to ensure space for controls
         ),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
           children: [
             Align(
               alignment: Alignment.topRight,
@@ -279,6 +288,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 },
               ),
             ),
+            const Spacer(), // Push image + song name into the vertical center
             if (_selectedAlbum?.imageUrl.isNotEmpty == true)
               ClipRRect(
                 borderRadius: BorderRadius.circular(12),
@@ -295,8 +305,78 @@ class _SearchScreenState extends State<SearchScreen> {
               style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
               textAlign: TextAlign.center,
             ),
-            const SizedBox(height: 8),
-            PlayerWidget(player: _player),
+            const Spacer(), // Push the rest (slider + controls) up a bit
+            // Slider and Duration display
+            StreamBuilder<Duration>(
+              stream: _player.positionStream,
+              builder: (context, snapshot) {
+                final position = snapshot.data ?? Duration.zero;
+                final duration = _player.duration ?? Duration.zero;
+
+                return Column(
+                  children: [
+                    Slider(
+                      value: position.inSeconds.toDouble().clamp(
+                        0.0,
+                        duration.inSeconds.toDouble(),
+                      ),
+                      min: 0.0,
+                      max: duration.inSeconds.toDouble(),
+                      onChanged: (value) {
+                        _player.seek(Duration(seconds: value.toInt()));
+                      },
+                    ),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(_formatDuration(position)),
+                        Text(_formatDuration(duration)),
+                      ],
+                    ),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(
+              height: 8,
+            ), // Reduced space before controls for better alignment
+            // Controls at the bottom
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton(
+                  iconSize: 40.0,
+                  icon: const Icon(Icons.skip_previous),
+                  onPressed: () {
+                    setState(() {
+                      final position = _player.position;
+                      if (position.inSeconds <= 2) {
+                        // Go to the previous song if the current song has been playing for 2 seconds or less
+                        if (_currentSongIndex > 0) {
+                          _currentSongIndex--;
+                          _fetchActualMp3Url(
+                            _songs[_currentSongIndex].audioUrl,
+                          );
+                        }
+                      } else {
+                        // Restart the current song
+                        _player.seek(Duration.zero);
+                      }
+                    });
+                  },
+                ),
+                IconButton(
+                  iconSize: 48.0,
+                  icon: Icon(_player.playing ? Icons.pause : Icons.play_arrow),
+                  onPressed: _playPause,
+                ),
+                IconButton(
+                  iconSize: 40.0,
+                  icon: const Icon(Icons.skip_next),
+                  onPressed: _playNextSong,
+                ),
+              ],
+            ),
           ],
         ),
       ),
@@ -311,10 +391,8 @@ class _SearchScreenState extends State<SearchScreen> {
       color: Colors.white,
       child: InkWell(
         onTap: () {
-          if (_songs.isEmpty || _selectedAlbum == null) return;
-
           setState(() {
-            _isPlayerExpanded = true;
+            _isPlayerExpanded = true; // Expand player when tapped
           });
         },
         child: Container(
@@ -340,22 +418,29 @@ class _SearchScreenState extends State<SearchScreen> {
                   style: const TextStyle(fontSize: 16),
                 ),
               ),
-              IconButton(
-                icon: Icon(
-                  _player.state == PlayerState.playing
-                      ? Icons.pause
-                      : Icons.play_arrow,
-                ),
-                onPressed: () async {
-                  if (_songs.isEmpty || _selectedAlbum == null) return;
+              StreamBuilder<PlayerState>(
+                stream: _player.playerStateStream,
+                builder: (context, snapshot) {
+                  final playerState = snapshot.data;
 
-                  if (_player.state == PlayerState.playing) {
-                    await _player.pause();
-                  } else {
-                    await _player.resume();
-                  }
+                  return IconButton(
+                    icon: Icon(
+                      playerState?.playing == true
+                          ? Icons.pause
+                          : Icons.play_arrow,
+                    ),
+                    onPressed: () async {
+                      if (_songs.isEmpty || _selectedAlbum == null) return;
 
-                  setState(() {});
+                      if (_player.playerState.playing) {
+                        await _player.pause();
+                      } else {
+                        await _player.play();
+                      }
+
+                      setState(() {}); // Trigger UI update
+                    },
+                  );
                 },
               ),
             ],
@@ -533,121 +618,53 @@ class Song {
 
 class PlayerWidget extends StatefulWidget {
   final AudioPlayer player;
+  final List<Song> songs;
+  final int currentIndex;
+  final void Function(int newIndex) onChangeSong;
 
-  const PlayerWidget({required this.player, super.key});
+  const PlayerWidget({
+    required this.player,
+    required this.songs,
+    required this.currentIndex,
+    required this.onChangeSong,
+    super.key,
+  });
 
   @override
   State<StatefulWidget> createState() => _PlayerWidgetState();
 }
 
 class _PlayerWidgetState extends State<PlayerWidget> {
-  PlayerState? _playerState;
-  Duration? _duration;
-  Duration? _position;
+  late AudioPlayer _player;
+  late StreamSubscription _playerStateSubscription;
 
-  StreamSubscription? _durationSubscription;
-  StreamSubscription? _positionSubscription;
-  StreamSubscription? _playerCompleteSubscription;
-  StreamSubscription? _playerStateChangeSubscription;
-
-  bool get _isPlaying => _playerState == PlayerState.playing;
-  bool get _isPaused => _playerState == PlayerState.paused;
-  String get _durationText => _duration?.toString().split('.').first ?? '';
-  String get _positionText => _position?.toString().split('.').first ?? '';
-  AudioPlayer get player => widget.player;
+  bool get _isPlaying => _player.playing;
 
   @override
   void initState() {
     super.initState();
-    _playerState = player.state;
-    player.getDuration().then((value) => setState(() => _duration = value));
-    player.getCurrentPosition().then(
-      (value) => setState(() => _position = value),
-    );
-    _initStreams();
-  }
-
-  @override
-  void setState(VoidCallback fn) {
-    if (mounted) super.setState(fn);
+    _player = widget.player;
+    _playerStateSubscription = _player.playerStateStream.listen((state) {
+      setState(() {});
+    });
   }
 
   @override
   void dispose() {
-    _durationSubscription?.cancel();
-    _positionSubscription?.cancel();
-    _playerCompleteSubscription?.cancel();
-    _playerStateChangeSubscription?.cancel();
+    _playerStateSubscription.cancel();
     super.dispose();
   }
 
-  void _initStreams() {
-    _durationSubscription = player.onDurationChanged.listen(
-      (d) => setState(() => _duration = d),
-    );
-    _positionSubscription = player.onPositionChanged.listen(
-      (p) => setState(() => _position = p),
-    );
-    _playerCompleteSubscription = player.onPlayerComplete.listen((_) {
-      setState(() {
-        _playerState = PlayerState.stopped;
-        _position = Duration.zero;
-      });
-    });
-    _playerStateChangeSubscription = player.onPlayerStateChanged.listen((
-      state,
-    ) {
-      setState(() => _playerState = state);
-    });
-  }
-
-  Future<void> _play() async {
-    await player.resume();
-  }
-
-  Future<void> _pause() async {
-    await player.pause();
-  }
-
-  Future<void> _stop() async {
-    await player.stop();
-    setState(() {
-      _playerState = PlayerState.stopped;
-      _position = Duration.zero;
-    });
-  }
-
-  void _rewind() {
-    if (_position != null && _position! > const Duration(seconds: 3)) {
-      player.seek(Duration.zero);
+  void _playPause() {
+    if (_isPlaying) {
+      _player.pause();
     } else {
-      final parent = context.findAncestorStateOfType<_SearchScreenState>();
-      if (parent != null && parent._currentSongIndex > 0) {
-        parent.setState(() {
-          parent._currentSongIndex--;
-        });
-        parent._fetchActualMp3Url(
-          parent._songs[parent._currentSongIndex].audioUrl,
-        );
-      }
-    }
-  }
-
-  void _skip() {
-    final parent = context.findAncestorStateOfType<_SearchScreenState>();
-    if (parent != null && parent._currentSongIndex < parent._songs.length - 1) {
-      parent.setState(() {
-        parent._currentSongIndex++;
-      });
-      parent._fetchActualMp3Url(
-        parent._songs[parent._currentSongIndex].audioUrl,
-      );
+      _player.play();
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final color = Theme.of(context).primaryColor;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -655,59 +672,36 @@ class _PlayerWidgetState extends State<PlayerWidget> {
           mainAxisSize: MainAxisSize.min,
           children: [
             IconButton(
-              onPressed: _rewind,
+              onPressed: () {
+                if (widget.currentIndex > 0) {
+                  widget.onChangeSong(widget.currentIndex - 1);
+                }
+              },
               iconSize: 40.0,
               icon: const Icon(Icons.skip_previous),
-              color: color,
             ),
             IconButton(
-              onPressed: _isPlaying ? null : _play,
+              onPressed: _playPause,
               iconSize: 48.0,
-              icon: const Icon(Icons.play_arrow),
-              color: color,
+              icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
             ),
             IconButton(
-              onPressed: _isPlaying ? _pause : null,
-              iconSize: 48.0,
-              icon: const Icon(Icons.pause),
-              color: color,
-            ),
-            IconButton(
-              onPressed: _isPlaying || _isPaused ? _stop : null,
+              onPressed: () {
+                _player.stop();
+              },
               iconSize: 48.0,
               icon: const Icon(Icons.stop),
-              color: color,
             ),
             IconButton(
-              onPressed: _skip,
+              onPressed: () {
+                if (widget.currentIndex < widget.songs.length - 1) {
+                  widget.onChangeSong(widget.currentIndex + 1);
+                }
+              },
               iconSize: 40.0,
               icon: const Icon(Icons.skip_next),
-              color: color,
             ),
           ],
-        ),
-        Slider(
-          onChanged: (value) {
-            final duration = _duration;
-            if (duration == null) return;
-            final position = value * duration.inMilliseconds;
-            player.seek(Duration(milliseconds: position.round()));
-          },
-          value:
-              (_position != null &&
-                      _duration != null &&
-                      _position!.inMilliseconds > 0 &&
-                      _position!.inMilliseconds < _duration!.inMilliseconds)
-                  ? _position!.inMilliseconds / _duration!.inMilliseconds
-                  : 0.0,
-        ),
-        Text(
-          _position != null
-              ? '$_positionText / $_durationText'
-              : _duration != null
-              ? _durationText
-              : '',
-          style: const TextStyle(fontSize: 16.0),
         ),
       ],
     );
