@@ -26,7 +26,6 @@ class SearchScreen extends StatefulWidget {
 
 class _SearchScreenState extends State<SearchScreen> {
   final TextEditingController _searchController = TextEditingController();
-  final TextEditingController _controller = TextEditingController();
   final http.Client _httpClient = http.Client();
 
   List<Album> _albums = [];
@@ -50,31 +49,17 @@ class _SearchScreenState extends State<SearchScreen> {
     });
   }
 
-  void _searchAlbums(String query) async {
-    if (query.isEmpty) {
-      setState(() {
-        _albums = [];
-      });
-      return;
-    }
-
+  // Offload network request and album list parsing to a background isolate
+  Future<List<Album>> _fetchAlbumsAsync(String query) async {
     final formattedText = query.replaceAll(' ', '+');
     final url = Uri.parse(
       'https://downloads.khinsider.com/search?search=$formattedText',
     );
-
-    try {
-      final response = await _httpClient.get(url);
-      if (response.statusCode == 200) {
-        final albums = await compute(parseAlbumList, response.body);
-        setState(() {
-          _albums = albums;
-        });
-      } else {
-        debugPrint('Server error: ${response.statusCode}');
-      }
-    } catch (e) {
-      debugPrint("Error occurred: $e");
+    final response = await _httpClient.get(url);
+    if (response.statusCode == 200) {
+      return await compute(parseAlbumList, response.body);
+    } else {
+      throw Exception('Failed to load albums');
     }
   }
 
@@ -124,36 +109,6 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   // Ensure that when a song is selected from the list, the correct index is set
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    _httpClient.close();
-    _player.dispose();
-    super.dispose();
-  }
-
-  Future<void> _handleSubmitted(String text) async {
-    final formattedText = text.replaceAll(' ', '+');
-    final url = Uri.parse(
-      'https://downloads.khinsider.com/search?search=$formattedText',
-    );
-
-    try {
-      final response = await _httpClient.get(url);
-      if (response.statusCode == 200) {
-        final albums = await compute(parseAlbumList, response.body);
-        setState(() {
-          _albums = albums;
-        });
-      } else {
-        debugPrint('Server error: ${response.statusCode}');
-      }
-    } catch (e) {
-      debugPrint("Error occurred: $e");
-    }
-  }
-
   Future<void> _fetchAlbumPage(String albumUrl) async {
     final fullUrl = 'https://downloads.khinsider.com$albumUrl';
     try {
@@ -187,43 +142,63 @@ class _SearchScreenState extends State<SearchScreen> {
     return url.replaceFirst('/thumbs/', '/');
   }
 
+  // Widget for displaying the album list
   Widget _buildAlbumList() {
-    return ListView.builder(
-      itemCount: _albums.length,
-      itemBuilder: (context, index) {
-        final album = _albums[index];
-        return ListTile(
-          leading:
-              album.imageUrl.isNotEmpty
-                  ? CircleAvatar(
-                    backgroundImage: NetworkImage(album.imageUrl),
-                    radius: 30,
-                  )
-                  : const CircleAvatar(
-                    backgroundColor: Colors.grey,
-                    radius: 30,
-                    child: Icon(Icons.music_note, color: Colors.white),
-                  ),
-          title: Text(album.albumName),
-          subtitle: Text('${album.type} - ${album.year} | ${album.platform}'),
-          onTap: () {
-            setState(() {
-              _selectedAlbum = album;
-            });
-            _fetchAlbumPage(album.albumUrl);
-          },
-        );
+    return FutureBuilder<List<Album>>(
+      future: _fetchAlbumsAsync(
+        _searchController.text,
+      ), // Trigger the async function when the search is submitted
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        } else if (snapshot.hasError) {
+          return Center(child: Text('Error: ${snapshot.error}'));
+        } else if (!snapshot.hasData || snapshot.data!.isEmpty) {
+          return const Center(child: Text('No albums found.'));
+        } else {
+          _albums = snapshot.data!;
+          return ListView.builder(
+            itemCount: _albums.length,
+            itemBuilder: (context, index) {
+              final album = _albums[index];
+              return ListTile(
+                leading:
+                    album.imageUrl.isNotEmpty
+                        ? CircleAvatar(
+                          backgroundImage: NetworkImage(album.imageUrl),
+                          radius: 30,
+                        )
+                        : const CircleAvatar(
+                          backgroundColor: Colors.grey,
+                          radius: 30,
+                          child: Icon(Icons.music_note, color: Colors.white),
+                        ),
+                title: Text(album.albumName),
+                subtitle: Text(
+                  '${album.type} - ${album.year} | ${album.platform}',
+                ),
+                onTap: () {
+                  setState(() {
+                    _selectedAlbum = album;
+                  });
+                  _fetchAlbumPage(album.albumUrl);
+                },
+              );
+            },
+          );
+        }
       },
     );
   }
 
+  // Widget for displaying the song list
   Widget _buildSongList() {
     return ListView(
       children: [
         const SizedBox(height: 16),
         Center(
           child:
-              _selectedAlbum!.imageUrl.isNotEmpty
+              _selectedAlbum?.imageUrl.isNotEmpty == true
                   ? ClipRRect(
                     borderRadius: BorderRadius.circular(8),
                     child: Image.network(
@@ -278,8 +253,15 @@ class _SearchScreenState extends State<SearchScreen> {
       elevation: 12,
       color: Colors.white,
       child: Container(
-        height: MediaQuery.of(context).size.height * 0.6,
-        padding: const EdgeInsets.all(20),
+        height: MediaQuery.of(context).size.height,
+        width: MediaQuery.of(context).size.width,
+        color: Colors.white,
+        padding: const EdgeInsets.only(
+          top: 40,
+          left: 20,
+          right: 20,
+          bottom: 20,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -287,7 +269,14 @@ class _SearchScreenState extends State<SearchScreen> {
               alignment: Alignment.topRight,
               child: IconButton(
                 icon: const Icon(Icons.keyboard_arrow_down),
-                onPressed: () => setState(() => _isPlayerExpanded = false),
+                onPressed: () {
+                  setState(() {
+                    _isPlayerExpanded = false;
+                    SystemChrome.setEnabledSystemUIMode(
+                      SystemUiMode.edgeToEdge,
+                    );
+                  });
+                },
               ),
             ),
             if (_selectedAlbum?.imageUrl.isNotEmpty == true)
@@ -321,7 +310,13 @@ class _SearchScreenState extends State<SearchScreen> {
       elevation: 6,
       color: Colors.white,
       child: InkWell(
-        onTap: () => setState(() => _isPlayerExpanded = true),
+        onTap: () {
+          if (_songs.isEmpty || _selectedAlbum == null) return;
+
+          setState(() {
+            _isPlayerExpanded = true;
+          });
+        },
         child: Container(
           height: 70,
           padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -351,17 +346,17 @@ class _SearchScreenState extends State<SearchScreen> {
                       ? Icons.pause
                       : Icons.play_arrow,
                 ),
-                onPressed: () {
+                onPressed: () async {
+                  if (_songs.isEmpty || _selectedAlbum == null) return;
+
                   if (_player.state == PlayerState.playing) {
-                    _player.pause();
+                    await _player.pause();
                   } else {
-                    _player.resume();
+                    await _player.resume();
                   }
+
+                  setState(() {});
                 },
-              ),
-              IconButton(
-                icon: const Icon(Icons.keyboard_arrow_up),
-                onPressed: () => setState(() => _isPlayerExpanded = true),
               ),
             ],
           ),
@@ -373,7 +368,10 @@ class _SearchScreenState extends State<SearchScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('KHInsider Search')),
+      appBar:
+          _isPlayerExpanded
+              ? null
+              : AppBar(title: const Text('KHInsider Search')),
       body: Stack(
         children: [
           Padding(
@@ -387,7 +385,9 @@ class _SearchScreenState extends State<SearchScreen> {
                       labelText: 'Search Albums',
                       border: OutlineInputBorder(),
                     ),
-                    onChanged: (value) => _searchAlbums(value),
+                    onSubmitted: (value) {
+                      setState(() {});
+                    }, // Trigger search on Enter
                   ),
                   const SizedBox(height: 16),
                 ],
@@ -413,59 +413,25 @@ class _SearchScreenState extends State<SearchScreen> {
             ),
         ],
       ),
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: 0,
-        onTap: (index) {
-          // Handle tab switching if needed
-        },
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.search), label: 'Search'),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.favorite),
-            label: 'Favorites',
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class FullScreenPlayerScreen extends StatelessWidget {
-  final AudioPlayer player;
-  final String songName;
-  final String albumName;
-  final String albumArtUrl;
-
-  const FullScreenPlayerScreen({
-    required this.player,
-    required this.songName,
-    required this.albumName,
-    required this.albumArtUrl,
-    super.key,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text(albumName)),
-      body: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Image.network(
-            albumArtUrl,
-            width: 250,
-            height: 250,
-            fit: BoxFit.cover,
-          ),
-          const SizedBox(height: 20),
-          Text(
-            songName,
-            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 20),
-          PlayerWidget(player: player),
-        ],
-      ),
+      bottomNavigationBar:
+          _isPlayerExpanded
+              ? null // Hides the bottom navigation bar when player is expanded
+              : BottomNavigationBar(
+                currentIndex: 0,
+                onTap: (index) {
+                  // Handle tab switching if needed
+                },
+                items: const [
+                  BottomNavigationBarItem(
+                    icon: Icon(Icons.search),
+                    label: 'Search',
+                  ),
+                  BottomNavigationBarItem(
+                    icon: Icon(Icons.favorite),
+                    label: 'Favorites',
+                  ),
+                ],
+              ),
     );
   }
 }
