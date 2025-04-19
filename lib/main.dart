@@ -55,7 +55,9 @@ class _SearchScreenState extends State<SearchScreen> {
       final index = state.currentIndex;
       setState(() {
         _currentSongIndex = index;
-        _currentSongUrl = (_playlist?.children[index] as ProgressiveAudioSource).uri.toString();
+        _currentSongUrl =
+            (_playlist?.children[index] as ProgressiveAudioSource).uri
+                .toString();
       });
     });
   }
@@ -70,7 +72,9 @@ class _SearchScreenState extends State<SearchScreen> {
 
   Future<List<Map<String, String>>> _fetchAlbumsAsync(String query) async {
     final formattedText = query.replaceAll(' ', '+');
-    final url = Uri.parse('https://downloads.khinsider.com/search?search=$formattedText');
+    final url = Uri.parse(
+      'https://downloads.khinsider.com/search?search=$formattedText',
+    );
     final response = await _httpClient.get(url);
     if (response.statusCode == 200) {
       return await compute(parseAlbumList, response.body);
@@ -96,7 +100,9 @@ class _SearchScreenState extends State<SearchScreen> {
       _player.play();
       setState(() {
         _currentSongIndex = index;
-        _currentSongUrl = (_playlist!.children[index] as ProgressiveAudioSource).uri.toString();
+        _currentSongUrl =
+            (_playlist!.children[index] as ProgressiveAudioSource).uri
+                .toString();
       });
     } catch (e) {
       debugPrint('Error playing audio: $e');
@@ -107,10 +113,12 @@ class _SearchScreenState extends State<SearchScreen> {
     final response = await _httpClient.get(Uri.parse(detailPageUrl));
     if (response.statusCode == 200) {
       final document = html_parser.parse(response.body);
-      final mp3Anchor = document.querySelectorAll('a').firstWhere(
-        (a) => a.attributes['href']?.endsWith('.mp3') ?? false,
-        orElse: () => throw Exception('MP3 link not found'),
-      );
+      final mp3Anchor = document
+          .querySelectorAll('a')
+          .firstWhere(
+            (a) => a.attributes['href']?.endsWith('.mp3') ?? false,
+            orElse: () => throw Exception('MP3 link not found'),
+          );
       return mp3Anchor.attributes['href']!;
     } else {
       throw Exception('Failed to load MP3 URL');
@@ -129,31 +137,39 @@ class _SearchScreenState extends State<SearchScreen> {
       final response = await _httpClient.get(Uri.parse(fullUrl));
       if (response.statusCode == 200) {
         final imageUrl = _getHighResImageUrl(
-          html_parser.parse(response.body).querySelector('.albumImage img')?.attributes['src'] ?? '',
+          html_parser
+                  .parse(response.body)
+                  .querySelector('.albumImage img')
+                  ?.attributes['src'] ??
+              '',
         );
 
         final albumName = _selectedAlbum?['albumName'] ?? 'Unknown';
 
         setState(() {
-          _selectedAlbum = _selectedAlbum != null
-              ? {..._selectedAlbum!, 'imageUrl': imageUrl}
-              : {'imageUrl': imageUrl, 'albumName': albumName};
+          _selectedAlbum =
+              _selectedAlbum != null
+                  ? {..._selectedAlbum!, 'imageUrl': imageUrl}
+                  : {'imageUrl': imageUrl, 'albumName': albumName};
         });
 
         // Pass a serializable map to compute
         final songs = await compute(
-          (input) => parseSongList(input['body']!, input['albumName']!, input['imageUrl']!),
-          {
-            'body': response.body,
-            'albumName': albumName,
-            'imageUrl': imageUrl,
-          },
+          (input) => parseSongList(
+            input['body']!,
+            input['albumName']!,
+            input['imageUrl']!,
+          ),
+          {'body': response.body, 'albumName': albumName, 'imageUrl': imageUrl},
         );
 
         setState(() {
           _songs = songs;
           _playlist = ConcatenatingAudioSource(
-            children: songs.map((song) => song['audioSource'] as AudioSource).toList(),
+            children:
+                songs
+                    .map((song) => song['audioSource'] as AudioSource)
+                    .toList(),
           );
         });
       } else {
@@ -185,18 +201,21 @@ class _SearchScreenState extends State<SearchScreen> {
             itemBuilder: (context, index) {
               final album = _albums[index];
               return ListTile(
-                leading: album['imageUrl']!.isNotEmpty
-                    ? CircleAvatar(
-                        backgroundImage: NetworkImage(album['imageUrl']!),
-                        radius: 30,
-                      )
-                    : const CircleAvatar(
-                        backgroundColor: Colors.grey,
-                        radius: 30,
-                        child: Icon(Icons.music_note, color: Colors.white),
-                      ),
+                leading:
+                    album['imageUrl']!.isNotEmpty
+                        ? CircleAvatar(
+                          backgroundImage: NetworkImage(album['imageUrl']!),
+                          radius: 30,
+                        )
+                        : const CircleAvatar(
+                          backgroundColor: Colors.grey,
+                          radius: 30,
+                          child: Icon(Icons.music_note, color: Colors.white),
+                        ),
                 title: Text(album['albumName']!),
-                subtitle: Text('${album['type']} - ${album['year']} | ${album['platform']}'),
+                subtitle: Text(
+                  '${album['type']} - ${album['year']} | ${album['platform']}',
+                ),
                 onTap: () {
                   setState(() {
                     _selectedAlbum = album;
@@ -220,22 +239,23 @@ class _SearchScreenState extends State<SearchScreen> {
       children: [
         const SizedBox(height: 16),
         Center(
-          child: _selectedAlbum?['imageUrl']?.isNotEmpty == true
-              ? ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.network(
-                    _selectedAlbum!['imageUrl']!,
+          child:
+              _selectedAlbum?['imageUrl']?.isNotEmpty == true
+                  ? ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.network(
+                      _selectedAlbum!['imageUrl']!,
+                      width: 200,
+                      height: 200,
+                      fit: BoxFit.cover,
+                    ),
+                  )
+                  : Container(
                     width: 200,
                     height: 200,
-                    fit: BoxFit.cover,
+                    color: Colors.grey[300],
+                    child: const Icon(Icons.music_note, size: 100),
                   ),
-                )
-              : Container(
-                  width: 200,
-                  height: 200,
-                  color: Colors.grey[300],
-                  child: const Icon(Icons.music_note, size: 100),
-                ),
         ),
         const SizedBox(height: 12),
         Text(
@@ -265,6 +285,8 @@ class _SearchScreenState extends State<SearchScreen> {
             },
           );
         }),
+        if (_currentSongUrl != null)
+          const SizedBox(height: 70), // Add padding for miniplayer
       ],
     );
   }
@@ -280,7 +302,12 @@ class _SearchScreenState extends State<SearchScreen> {
         height: MediaQuery.of(context).size.height,
         width: MediaQuery.of(context).size.width,
         color: Colors.white,
-        padding: const EdgeInsets.only(top: 40, left: 20, right: 20, bottom: 40),
+        padding: const EdgeInsets.only(
+          top: 40,
+          left: 20,
+          right: 20,
+          bottom: 40,
+        ),
         child: Column(
           children: [
             Align(
@@ -290,7 +317,9 @@ class _SearchScreenState extends State<SearchScreen> {
                 onPressed: () {
                   setState(() {
                     _isPlayerExpanded = false;
-                    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+                    SystemChrome.setEnabledSystemUIMode(
+                      SystemUiMode.edgeToEdge,
+                    );
                   });
                 },
               ),
@@ -322,7 +351,10 @@ class _SearchScreenState extends State<SearchScreen> {
                 return Column(
                   children: [
                     Slider(
-                      value: position.inSeconds.toDouble().clamp(0.0, duration.inSeconds.toDouble()),
+                      value: position.inSeconds.toDouble().clamp(
+                        0.0,
+                        duration.inSeconds.toDouble(),
+                      ),
                       min: 0.0,
                       max: duration.inSeconds.toDouble(),
                       onChanged: (value) {
@@ -382,7 +414,8 @@ class _SearchScreenState extends State<SearchScreen> {
 
   Widget _buildMiniPlayer() {
     final song = _songs.isNotEmpty ? _songs[_currentSongIndex] : null;
-    final audioSource = song != null ? song['audioSource'] as ProgressiveAudioSource : null;
+    final audioSource =
+        song != null ? song['audioSource'] as ProgressiveAudioSource : null;
 
     return Material(
       elevation: 6,
@@ -421,7 +454,11 @@ class _SearchScreenState extends State<SearchScreen> {
                 builder: (context, snapshot) {
                   final playerState = snapshot.data;
                   return IconButton(
-                    icon: Icon(playerState?.playing == true ? Icons.pause : Icons.play_arrow),
+                    icon: Icon(
+                      playerState?.playing == true
+                          ? Icons.pause
+                          : Icons.play_arrow,
+                    ),
                     onPressed: () async {
                       if (_songs.isEmpty || _selectedAlbum == null) return;
                       if (_player.playerState.playing) {
@@ -444,7 +481,10 @@ class _SearchScreenState extends State<SearchScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: _isPlayerExpanded ? null : AppBar(title: const Text('KHInsider Search')),
+      appBar:
+          _isPlayerExpanded
+              ? null
+              : AppBar(title: const Text('KHInsider Search')),
       body: Stack(
         children: [
           Padding(
@@ -465,7 +505,10 @@ class _SearchScreenState extends State<SearchScreen> {
                   const SizedBox(height: 16),
                 ],
                 Expanded(
-                  child: _selectedAlbum == null ? _buildAlbumList() : _buildSongList(),
+                  child:
+                      _selectedAlbum == null
+                          ? _buildAlbumList()
+                          : _buildSongList(),
                 ),
               ],
             ),
@@ -475,21 +518,31 @@ class _SearchScreenState extends State<SearchScreen> {
               alignment: Alignment.bottomCenter,
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 300),
-                child: _isPlayerExpanded ? _buildExpandedPlayer() : _buildMiniPlayer(),
+                child:
+                    _isPlayerExpanded
+                        ? _buildExpandedPlayer()
+                        : _buildMiniPlayer(),
               ),
             ),
         ],
       ),
-      bottomNavigationBar: _isPlayerExpanded
-          ? null
-          : BottomNavigationBar(
-              currentIndex: 0,
-              onTap: (index) {},
-              items: const [
-                BottomNavigationBarItem(icon: Icon(Icons.search), label: 'Search'),
-                BottomNavigationBarItem(icon: Icon(Icons.favorite), label: 'Favorites'),
-              ],
-            ),
+      bottomNavigationBar:
+          _isPlayerExpanded
+              ? null
+              : BottomNavigationBar(
+                currentIndex: 0,
+                onTap: (index) {},
+                items: const [
+                  BottomNavigationBarItem(
+                    icon: Icon(Icons.search),
+                    label: 'Search',
+                  ),
+                  BottomNavigationBarItem(
+                    icon: Icon(Icons.favorite),
+                    label: 'Favorites',
+                  ),
+                ],
+              ),
     );
   }
 }
@@ -503,7 +556,8 @@ List<Map<String, String>> parseAlbumList(String htmlBody) {
         final cols = row.querySelectorAll('td');
         if (cols.length < 5) return null;
 
-        final albumName = '${cols[1].querySelector('a')?.text.trim() ?? ''} ${cols[1].querySelector('span')?.text.trim() ?? ''}';
+        final albumName =
+            '${cols[1].querySelector('a')?.text.trim() ?? ''} ${cols[1].querySelector('span')?.text.trim() ?? ''}';
         final platform = cols[2].text.trim();
         final type = cols[3].text.trim();
         final year = cols[4].text.trim();
@@ -523,7 +577,11 @@ List<Map<String, String>> parseAlbumList(String htmlBody) {
       .toList();
 }
 
-Future<List<Map<String, dynamic>>> parseSongList(String htmlBody, String albumName, String albumImageUrl) async {
+Future<List<Map<String, dynamic>>> parseSongList(
+  String htmlBody,
+  String albumName,
+  String albumImageUrl,
+) async {
   final document = html_parser.parse(htmlBody);
   final rows = document.querySelectorAll('#songlist tr');
   final List<Map<String, dynamic>> songs = [];
@@ -550,10 +608,7 @@ Future<List<Map<String, dynamic>>> parseSongList(String htmlBody, String albumNa
           artUri: albumImageUrl.isNotEmpty ? Uri.parse(albumImageUrl) : null,
         ),
       );
-      songs.add({
-        'audioSource': audioSource,
-        'runtime': runtime,
-      });
+      songs.add({'audioSource': audioSource, 'runtime': runtime});
     } catch (e) {
       debugPrint('Error fetching MP3 URL for $name: $e');
     }
@@ -568,10 +623,12 @@ Future<String> _fetchActualMp3UrlStatic(String detailPageUrl) async {
     final response = await client.get(Uri.parse(detailPageUrl));
     if (response.statusCode == 200) {
       final document = html_parser.parse(response.body);
-      final mp3Anchor = document.querySelectorAll('a').firstWhere(
-        (a) => a.attributes['href']?.endsWith('.mp3') ?? false,
-        orElse: () => throw Exception('MP3 link not found'),
-      );
+      final mp3Anchor = document
+          .querySelectorAll('a')
+          .firstWhere(
+            (a) => a.attributes['href']?.endsWith('.mp3') ?? false,
+            orElse: () => throw Exception('MP3 link not found'),
+          );
       return mp3Anchor.attributes['href']!;
     }
     throw Exception('Failed to load MP3 URL');
