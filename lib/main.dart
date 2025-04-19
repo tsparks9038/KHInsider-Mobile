@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -6,6 +7,7 @@ import 'package:html/parser.dart' as html_parser;
 import 'package:flutter/foundation.dart'; // for compute()
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
+import 'package:pool/pool.dart';
 
 Future<void> main() async {
   await JustAudioBackground.init(
@@ -127,20 +129,6 @@ class _SearchScreenState extends State<SearchScreen> {
       }
     });
     _player.setLoopMode(_loopMode);
-  }
-
-  Future<String> _fetchActualMp3Url(String detailPageUrl) async {
-    final response = await _httpClient.get(Uri.parse(detailPageUrl));
-    if (response.statusCode == 200) {
-      final document = html_parser.parse(response.body);
-      final mp3Anchor = document.querySelectorAll('a').firstWhere(
-        (a) => a.attributes['href']?.endsWith('.mp3') ?? false,
-        orElse: () => throw Exception('MP3 link not found'),
-      );
-      return mp3Anchor.attributes['href']!;
-    } else {
-      throw Exception('Failed to load MP3 URL');
-    }
   }
 
   String _formatDuration(Duration duration) {
@@ -583,6 +571,8 @@ Future<List<Map<String, dynamic>>> parseSongList(String htmlBody, String albumNa
   final document = html_parser.parse(htmlBody);
   final rows = document.querySelectorAll('#songlist tr');
   final List<Map<String, dynamic>> songs = [];
+  final List<Future<Map<String, dynamic>?>> futures = [];
+  final pool = Pool(Platform.numberOfProcessors);
 
   for (final row in rows) {
     final links = row.querySelectorAll('a');
@@ -594,26 +584,34 @@ Future<List<Map<String, dynamic>>> parseSongList(String htmlBody, String albumNa
     if (href == null || name.isEmpty || runtime.isEmpty) continue;
 
     final detailUrl = 'https://downloads.khinsider.com$href';
-    try {
-      final mp3Url = await _fetchActualMp3UrlStatic(detailUrl);
-      final audioSource = ProgressiveAudioSource(
-        Uri.parse(mp3Url),
-        tag: MediaItem(
-          id: mp3Url,
-          title: name,
-          album: albumName,
-          artist: albumName,
-          artUri: albumImageUrl.isNotEmpty ? Uri.parse(albumImageUrl) : null,
-        ),
-      );
-      songs.add({
-        'audioSource': audioSource,
-        'runtime': runtime,
-      });
-    } catch (e) {
-      debugPrint('Error fetching MP3 URL for $name: $e');
-    }
+
+    // Add a future for fetching the MP3 URL
+    futures.add(
+      pool.withResource(() => _fetchActualMp3UrlStatic(detailUrl).then((mp3Url) {
+        final audioSource = ProgressiveAudioSource(
+          Uri.parse(mp3Url),
+          tag: MediaItem(
+            id: mp3Url,
+            title: name,
+            album: albumName,
+            artist: albumName,
+            artUri: albumImageUrl.isNotEmpty ? Uri.parse(albumImageUrl) : null,
+          ),
+        );
+        return {
+          'audioSource': audioSource,
+          'runtime': runtime,
+        };
+      }).catchError((e) {
+        debugPrint('Error fetching MP3 URL for $name: $e');
+        return null; // Skip failed songs
+      })),
+    );
   }
+
+  // Wait for all MP3 URL fetches to complete
+  final results = await Future.wait(futures);
+  songs.addAll(results.whereType<Map<String, dynamic>>());
 
   return songs;
 }

@@ -35,6 +35,7 @@ dependencies:
   http: ^1.2.2
   html: ^0.15.4
   shared_preferences: ^2.3.0
+  pool: ^1.5.1
 
 dev_dependencies:
   flutter_test:
