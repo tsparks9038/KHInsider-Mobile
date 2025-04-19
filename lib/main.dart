@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,6 +9,7 @@ import 'package:flutter/foundation.dart'; // for compute()
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:pool/pool.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 Future<void> main() async {
   await JustAudioBackground.init(
@@ -50,10 +52,15 @@ class _SearchScreenState extends State<SearchScreen> {
   List<Map<String, dynamic>> _songs = []; // Stores AudioSource and runtime
   Map<String, String>? _selectedAlbum;
 
+  // Favorites list to store MediaItems and runtime
+  List<Map<String, dynamic>> _favorites = [];
+  int _currentNavIndex = 0;
+  bool _isFavoritesSelected = false;
+
   @override
   void initState() {
     super.initState();
-    _player.setLoopMode(LoopMode.off);
+    _loadPreferences();
     _player.sequenceStateStream.listen((state) {
       if (state == null) return;
       final index = state.currentIndex;
@@ -70,6 +77,82 @@ class _SearchScreenState extends State<SearchScreen> {
     _httpClient.close();
     _searchController.dispose();
     super.dispose();
+  }
+
+  // Load preferences from shared preferences
+  Future<void> _loadPreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _isShuffleEnabled = prefs.getBool('shuffleEnabled') ?? false;
+      final loopModeString = prefs.getString('loopMode') ?? 'off';
+      _loopMode = {
+        'off': LoopMode.off,
+        'one': LoopMode.one,
+        'all': LoopMode.all,
+      }[loopModeString] ?? LoopMode.off;
+    });
+    _player.setShuffleModeEnabled(_isShuffleEnabled);
+    _player.setLoopMode(_loopMode);
+    _loadFavorites();
+  }
+
+  // Load favorites from shared preferences
+  Future<void> _loadFavorites() async {
+    final prefs = await SharedPreferences.getInstance();
+    final favoritesJson = prefs.getString('favorites');
+    if (favoritesJson != null) {
+      final List<dynamic> favoritesList = jsonDecode(favoritesJson);
+      setState(() {
+        _favorites = favoritesList.map((item) {
+          final map = item as Map<String, dynamic>;
+          final mediaItem = MediaItem(
+            id: map['id'],
+            title: map['title'],
+            album: map['album'],
+            artist: map['artist'],
+            artUri: map['artUri'] != null ? Uri.parse(map['artUri']) : null,
+          );
+          return {
+            'audioSource': ProgressiveAudioSource(
+              Uri.parse(map['id']),
+              tag: mediaItem,
+            ),
+            'runtime': map['runtime'],
+          };
+        }).toList();
+      });
+    }
+  }
+
+  // Save preferences to shared preferences
+  Future<void> _savePreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('shuffleEnabled', _isShuffleEnabled);
+    await prefs.setString(
+      'loopMode',
+      {
+        LoopMode.off: 'off',
+        LoopMode.one: 'one',
+        LoopMode.all: 'all',
+      }[_loopMode]!,
+    );
+  }
+
+  // Save favorites to shared preferences
+  Future<void> _saveFavorites() async {
+    final prefs = await SharedPreferences.getInstance();
+    final favoritesJson = jsonEncode(_favorites.map((song) {
+      final mediaItem = (song['audioSource'] as ProgressiveAudioSource).tag as MediaItem;
+      return {
+        'id': mediaItem.id,
+        'title': mediaItem.title,
+        'album': mediaItem.album,
+        'artist': mediaItem.artist,
+        'artUri': mediaItem.artUri?.toString(),
+        'runtime': song['runtime'],
+      };
+    }).toList());
+    await prefs.setString('favorites', favoritesJson);
   }
 
   Future<List<Map<String, String>>> _fetchAlbumsAsync(String query) async {
@@ -93,7 +176,7 @@ class _SearchScreenState extends State<SearchScreen> {
     });
   }
 
-  Future<void> _playAudioSourceAtIndex(int index) async {
+  Future<void> _playAudioSourceAtIndex(int index, bool isFavorites) async {
     try {
       if (_playlist == null || index >= _playlist!.length) return;
       await _player.setAudioSource(_playlist!, initialIndex: index);
@@ -101,6 +184,7 @@ class _SearchScreenState extends State<SearchScreen> {
       setState(() {
         _currentSongIndex = index;
         _currentSongUrl = (_playlist!.children[index] as ProgressiveAudioSource).uri.toString();
+        _isFavoritesSelected = isFavorites;
       });
     } catch (e) {
       debugPrint('Error playing audio: $e');
@@ -116,6 +200,7 @@ class _SearchScreenState extends State<SearchScreen> {
     if (_isShuffleEnabled) {
       await _player.shuffle();
     }
+    await _savePreferences();
   }
 
   void _toggleLoopMode() {
@@ -129,6 +214,7 @@ class _SearchScreenState extends State<SearchScreen> {
       }
     });
     _player.setLoopMode(_loopMode);
+    _savePreferences();
   }
 
   String _formatDuration(Duration duration) {
@@ -175,6 +261,7 @@ class _SearchScreenState extends State<SearchScreen> {
             _player.shuffle();
           }
           _player.setLoopMode(_loopMode);
+          _isFavoritesSelected = false;
         });
       } else {
         debugPrint('Error: ${response.statusCode}');
@@ -186,6 +273,24 @@ class _SearchScreenState extends State<SearchScreen> {
 
   String _getHighResImageUrl(String url) {
     return url.replaceFirst('/thumbs/', '/');
+  }
+
+  // Toggle favorite status for a song
+  void _toggleFavorite(Map<String, dynamic> song) {
+    setState(() {
+      final mediaItem = (song['audioSource'] as ProgressiveAudioSource).tag as MediaItem;
+      if (_favorites.any((fav) => (fav['audioSource'] as ProgressiveAudioSource).tag.id == mediaItem.id)) {
+        _favorites.removeWhere((fav) => (fav['audioSource'] as ProgressiveAudioSource).tag.id == mediaItem.id);
+      } else {
+        _favorites.add(song);
+      }
+    });
+    _saveFavorites();
+  }
+
+  // Check if a song is favorited
+  bool _isFavorited(MediaItem mediaItem) {
+    return _favorites.any((fav) => (fav['audioSource'] as ProgressiveAudioSource).tag.id == mediaItem.id);
   }
 
   Widget _buildAlbumList() {
@@ -224,6 +329,7 @@ class _SearchScreenState extends State<SearchScreen> {
                     _playlist = null;
                     _currentSongIndex = 0;
                     _currentSongUrl = null;
+                    _isFavoritesSelected = false;
                   });
                   _fetchAlbumPage(album['albumUrl']!);
                 },
@@ -274,14 +380,88 @@ class _SearchScreenState extends State<SearchScreen> {
           final index = entry.key;
           final song = entry.value;
           final audioSource = song['audioSource'] as ProgressiveAudioSource;
+          final mediaItem = audioSource.tag as MediaItem;
           return ListTile(
             title: Text(audioSource.tag.title ?? 'Unknown'),
             subtitle: Text(song['runtime'] ?? 'Unknown'),
+            trailing: IconButton(
+              icon: Icon(
+                _isFavorited(mediaItem) ? Icons.favorite : Icons.favorite_border,
+                color: _isFavorited(mediaItem) ? Colors.red : null,
+              ),
+              onPressed: () => _toggleFavorite(song),
+            ),
             onTap: () {
               setState(() {
                 _isPlayerExpanded = false;
               });
-              _playAudioSourceAtIndex(index);
+              _playAudioSourceAtIndex(index, false);
+            },
+          );
+        }),
+        if (_currentSongUrl != null) const SizedBox(height: 70), // Add padding for miniplayer
+      ],
+    );
+  }
+
+  Widget _buildFavoritesList() {
+    if (_favorites.isEmpty) {
+      return const Center(child: Text('No favorite songs yet.'));
+    }
+
+    // Create playlist for favorites
+    _playlist = ConcatenatingAudioSource(
+      children: _favorites.map((song) => song['audioSource'] as AudioSource).toList(),
+    );
+
+    return ListView(
+      children: [
+        const SizedBox(height: 16),
+        Center(
+          child: Container(
+            width: 200,
+            height: 200,
+            color: Colors.grey[300],
+            child: const Icon(Icons.favorite, size: 100, color: Colors.red),
+          ),
+        ),
+        const SizedBox(height: 12),
+        const Text(
+          'Favorites',
+          style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 24),
+        ..._favorites.asMap().entries.map((entry) {
+          final index = entry.key;
+          final song = entry.value;
+          final audioSource = song['audioSource'] as ProgressiveAudioSource;
+          final mediaItem = audioSource.tag as MediaItem;
+          return ListTile(
+            leading: mediaItem.artUri != null
+                ? CircleAvatar(
+                    backgroundImage: NetworkImage(mediaItem.artUri.toString()),
+                    radius: 30,
+                  )
+                : const CircleAvatar(
+                    backgroundColor: Colors.grey,
+                    radius: 30,
+                    child: Icon(Icons.music_note, color: Colors.white),
+                  ),
+            title: Text(mediaItem.title ?? 'Unknown'),
+            subtitle: Text(song['runtime'] ?? 'Unknown'),
+            trailing: IconButton(
+              icon: Icon(
+                _isFavorited(mediaItem) ? Icons.favorite : Icons.favorite_border,
+                color: _isFavorited(mediaItem) ? Colors.red : null,
+              ),
+              onPressed: () => _toggleFavorite(song),
+            ),
+            onTap: () {
+              setState(() {
+                _isPlayerExpanded = false;
+              });
+              _playAudioSourceAtIndex(index, true);
             },
           );
         }),
@@ -291,8 +471,13 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   Widget _buildExpandedPlayer() {
-    final song = _songs[_currentSongIndex];
+    final songList = _isFavoritesSelected ? _favorites : _songs;
+    if (songList.isEmpty || _currentSongIndex >= songList.length) {
+      return const SizedBox();
+    }
+    final song = songList[_currentSongIndex];
     final audioSource = song['audioSource'] as ProgressiveAudioSource;
+    final mediaItem = audioSource.tag as MediaItem;
 
     return Material(
       elevation: 12,
@@ -317,21 +502,40 @@ class _SearchScreenState extends State<SearchScreen> {
               ),
             ),
             const Spacer(),
-            if (_selectedAlbum?['imageUrl']?.isNotEmpty == true)
+            if (mediaItem.artUri != null)
               ClipRRect(
                 borderRadius: BorderRadius.circular(12),
                 child: Image.network(
-                  _selectedAlbum!['imageUrl']!,
+                  mediaItem.artUri.toString(),
                   width: 200,
                   height: 200,
                   fit: BoxFit.cover,
                 ),
+              )
+            else
+              Container(
+                width: 200,
+                height: 200,
+                color: Colors.grey[300],
+                child: const Icon(Icons.music_note, size: 100),
               ),
             const SizedBox(height: 20),
             Text(
               audioSource.tag.title ?? 'Unknown',
               style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
               textAlign: TextAlign.center,
+            ),
+            Text(
+              audioSource.tag.album ?? 'Unknown',
+              style: const TextStyle(fontSize: 16, color: Colors.grey),
+              textAlign: TextAlign.center,
+            ),
+            IconButton(
+              icon: Icon(
+                _isFavorited(mediaItem) ? Icons.favorite : Icons.favorite_border,
+                color: _isFavorited(mediaItem) ? Colors.red : null,
+              ),
+              onPressed: () => _toggleFavorite(song),
             ),
             const Spacer(),
             StreamBuilder<Duration>(
@@ -396,7 +600,7 @@ class _SearchScreenState extends State<SearchScreen> {
                   iconSize: 40.0,
                   icon: const Icon(Icons.skip_next),
                   onPressed: () {
-                    if (_currentSongIndex < _songs.length - 1) {
+                    if (_currentSongIndex < songList.length - 1) {
                       _player.seekToNext();
                     }
                   },
@@ -420,9 +624,13 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   Widget _buildMiniPlayer() {
-    final song = _songs.isNotEmpty ? _songs[_currentSongIndex] : null;
-    final audioSource =
-        song != null ? song['audioSource'] as ProgressiveAudioSource : null;
+    final songList = _isFavoritesSelected ? _favorites : _songs;
+    if (songList.isEmpty || _currentSongIndex >= songList.length) {
+      return const SizedBox();
+    }
+    final song = songList[_currentSongIndex];
+    final audioSource = song['audioSource'] as ProgressiveAudioSource;
+    final mediaItem = audioSource.tag as MediaItem;
 
     return Material(
       elevation: 6,
@@ -438,23 +646,37 @@ class _SearchScreenState extends State<SearchScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Row(
             children: [
-              if (_selectedAlbum?['imageUrl']?.isNotEmpty == true)
+              if (mediaItem.artUri != null)
                 ClipRRect(
                   borderRadius: BorderRadius.circular(6),
                   child: Image.network(
-                    _selectedAlbum!['imageUrl']!,
+                    mediaItem.artUri.toString(),
                     width: 50,
                     height: 50,
                     fit: BoxFit.cover,
                   ),
+                )
+              else
+                Container(
+                  width: 50,
+                  height: 50,
+                  color: Colors.grey[300],
+                  child: const Icon(Icons.music_note, size: 30),
                 ),
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  audioSource?.tag.title ?? 'Playing...',
+                  audioSource.tag.title ?? 'Playing...',
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 16),
                 ),
+              ),
+              IconButton(
+                icon: Icon(
+                  _isFavorited(mediaItem) ? Icons.favorite : Icons.favorite_border,
+                  color: _isFavorited(mediaItem) ? Colors.red : null,
+                ),
+                onPressed: () => _toggleFavorite(song),
               ),
               StreamBuilder<PlayerState>(
                 stream: _player.playerStateStream,
@@ -467,7 +689,7 @@ class _SearchScreenState extends State<SearchScreen> {
                           : Icons.play_arrow,
                     ),
                     onPressed: () async {
-                      if (_songs.isEmpty || _selectedAlbum == null) return;
+                      if (songList.isEmpty) return;
                       if (_player.playerState.playing) {
                         await _player.pause();
                       } else {
@@ -495,7 +717,7 @@ class _SearchScreenState extends State<SearchScreen> {
             padding: const EdgeInsets.all(16.0),
             child: Column(
               children: [
-                if (_selectedAlbum == null) ...[
+                if (_currentNavIndex == 0 && _selectedAlbum == null) ...[
                   TextField(
                     controller: _searchController,
                     decoration: const InputDecoration(
@@ -509,7 +731,9 @@ class _SearchScreenState extends State<SearchScreen> {
                   const SizedBox(height: 16),
                 ],
                 Expanded(
-                  child: _selectedAlbum == null ? _buildAlbumList() : _buildSongList(),
+                  child: _currentNavIndex == 0
+                      ? (_selectedAlbum == null ? _buildAlbumList() : _buildSongList())
+                      : _buildFavoritesList(),
                 ),
               ],
             ),
@@ -527,8 +751,31 @@ class _SearchScreenState extends State<SearchScreen> {
       bottomNavigationBar: _isPlayerExpanded
           ? null
           : BottomNavigationBar(
-              currentIndex: 0,
-              onTap: (index) {},
+              currentIndex: _currentNavIndex,
+              onTap: (index) {
+                setState(() {
+                  _currentNavIndex = index;
+                  if (index == 0) {
+                    // Reset to search page
+                    _selectedAlbum = null;
+                    _songs = [];
+                    _playlist = null;
+                    _currentSongIndex = 0;
+                    _currentSongUrl = null;
+                    _isFavoritesSelected = false;
+                  } else {
+                    // Favorites page
+                    _selectedAlbum = null;
+                    _songs = [];
+                    _isFavoritesSelected = true;
+                    if (_favorites.isNotEmpty) {
+                      _playlist = ConcatenatingAudioSource(
+                        children: _favorites.map((song) => song['audioSource'] as AudioSource).toList(),
+                      );
+                    }
+                  }
+                });
+              },
               items: const [
                 BottomNavigationBarItem(icon: Icon(Icons.search), label: 'Search'),
                 BottomNavigationBarItem(icon: Icon(Icons.favorite), label: 'Favorites'),
