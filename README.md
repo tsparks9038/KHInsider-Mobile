@@ -1,3 +1,3 @@
 # khinsider_android
 
-KHInsider GUI application for Android.
+KHInsider VGM streaming application for Android.
