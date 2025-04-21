@@ -12,6 +12,7 @@ import 'package:pool/pool.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:share_plus/share_plus.dart';
 
 class PreferencesManager {
   static const String _backupFileName = 'shared_prefs_backup.json';
@@ -66,7 +67,7 @@ class PreferencesManager {
   static Future<File> exportPreferences() async {
     final directory = await getApplicationDocumentsDirectory();
     final backupFile = File('${directory.path}/$_backupFileName');
-    final exportFile = File('${directory.path}/shared_prefs_export.json');
+    final exportFile = File('${directory.path}/shared_prefs_export.pdf');
 
     if (await backupFile.exists()) {
       await backupFile.copy(exportFile.path);
@@ -990,12 +991,24 @@ class SettingsScreen extends StatelessWidget {
           children: [
             ElevatedButton(
               onPressed: () async {
-                final file = await PreferencesManager.exportPreferences();
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('Preferences exported to ${file.path}'),
-                  ),
-                );
+                try {
+                  final file = await PreferencesManager.exportPreferences();
+                  // Share the file using share_plus
+                  await Share.shareXFiles([
+                    XFile(file.path),
+                  ], text: 'Exported preferences from KHInsider Search');
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        'Preferences exported and shared from ${file.path}',
+                      ),
+                    ),
+                  );
+                } catch (e) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Error exporting preferences: $e')),
+                  );
+                }
               },
               child: const Text('Export Preferences'),
             ),
