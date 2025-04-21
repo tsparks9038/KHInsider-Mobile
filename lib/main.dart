@@ -10,13 +10,112 @@ import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:pool/pool.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:file_picker/file_picker.dart';
+
+class PreferencesManager {
+  static const String _backupFileName = 'shared_prefs_backup.json';
+  static SharedPreferences? _prefs;
+
+  // Initialize SharedPreferences
+  static Future<void> init() async {
+    _prefs = await SharedPreferences.getInstance();
+  }
+
+  // Setters with backup
+  static Future<bool> setBool(String key, bool value) async {
+    final result = await _prefs!.setBool(key, value);
+    await _backupPreferences();
+    return result;
+  }
+
+  static Future<bool> setString(String key, String value) async {
+    final result = await _prefs!.setString(key, value);
+    await _backupPreferences();
+    return result;
+  }
+
+  // Add other setters as needed (setInt, setDouble, etc.)
+
+  // Getters
+  static bool? getBool(String key) => _prefs!.getBool(key);
+  static String? getString(String key) => _prefs!.getString(key);
+
+  // Backup preferences to a file
+  static Future<void> _backupPreferences() async {
+    try {
+      final prefsMap = _prefs!.getKeys().fold<Map<String, dynamic>>({}, (
+        map,
+        key,
+      ) {
+        map[key] = _prefs!.get(key);
+        return map;
+      });
+
+      final jsonString = jsonEncode(prefsMap);
+      final directory = await getApplicationDocumentsDirectory();
+      final file = File('${directory.path}/$_backupFileName');
+      await file.writeAsString(jsonString);
+      debugPrint('Preferences backed up to ${file.path}');
+    } catch (e) {
+      debugPrint('Error backing up preferences: $e');
+    }
+  }
+
+  // Export preferences to a user-accessible file
+  static Future<File> exportPreferences() async {
+    final directory = await getApplicationDocumentsDirectory();
+    final backupFile = File('${directory.path}/$_backupFileName');
+    final exportFile = File('${directory.path}/shared_prefs_export.json');
+
+    if (await backupFile.exists()) {
+      await backupFile.copy(exportFile.path);
+      debugPrint('Preferences exported to ${exportFile.path}');
+    } else {
+      await _backupPreferences();
+      await backupFile.copy(exportFile.path);
+    }
+    return exportFile;
+  }
+
+  // Import preferences from a file
+  static Future<bool> importPreferences(File file) async {
+    try {
+      final jsonString = await file.readAsString();
+      final prefsMap = jsonDecode(jsonString) as Map<String, dynamic>;
+
+      await _prefs!.clear(); // Clear existing preferences
+      for (final entry in prefsMap.entries) {
+        if (entry.value is bool) {
+          await _prefs!.setBool(entry.key, entry.value);
+        } else if (entry.value is String) {
+          await _prefs!.setString(entry.key, entry.value);
+        } else if (entry.value is int) {
+          await _prefs!.setInt(entry.key, entry.value);
+        } else if (entry.value is double) {
+          await _prefs!.setDouble(entry.key, entry.value);
+        } else if (entry.value is List<String>) {
+          await _prefs!.setStringList(entry.key, entry.value);
+        }
+      }
+      await _backupPreferences(); // Backup after import
+      debugPrint('Preferences imported from ${file.path}');
+      return true;
+    } catch (e) {
+      debugPrint('Error importing preferences: $e');
+      return false;
+    }
+  }
+}
 
 Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   await JustAudioBackground.init(
     androidNotificationChannelId: 'com.example.khinsider_android.channel.audio',
     androidNotificationChannelName: 'Audio playback',
     androidNotificationOngoing: true,
   );
+  await PreferencesManager.init(); // Initialize PreferencesManager
   runApp(const SearchApp());
 }
 
@@ -66,7 +165,9 @@ class _SearchScreenState extends State<SearchScreen> {
       final index = state.currentIndex;
       setState(() {
         _currentSongIndex = index;
-        _currentSongUrl = (_playlist?.children[index] as ProgressiveAudioSource).uri.toString();
+        _currentSongUrl =
+            (_playlist?.children[index] as ProgressiveAudioSource).uri
+                .toString();
       });
     });
   }
@@ -81,15 +182,16 @@ class _SearchScreenState extends State<SearchScreen> {
 
   // Load preferences from shared preferences
   Future<void> _loadPreferences() async {
-    final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _isShuffleEnabled = prefs.getBool('shuffleEnabled') ?? false;
-      final loopModeString = prefs.getString('loopMode') ?? 'off';
-      _loopMode = {
-        'off': LoopMode.off,
-        'one': LoopMode.one,
-        'all': LoopMode.all,
-      }[loopModeString] ?? LoopMode.off;
+      _isShuffleEnabled = PreferencesManager.getBool('shuffleEnabled') ?? false;
+      final loopModeString = PreferencesManager.getString('loopMode') ?? 'off';
+      _loopMode =
+          {
+            'off': LoopMode.off,
+            'one': LoopMode.one,
+            'all': LoopMode.all,
+          }[loopModeString] ??
+          LoopMode.off;
     });
     _player.setShuffleModeEnabled(_isShuffleEnabled);
     _player.setLoopMode(_loopMode);
@@ -98,37 +200,36 @@ class _SearchScreenState extends State<SearchScreen> {
 
   // Load favorites from shared preferences
   Future<void> _loadFavorites() async {
-    final prefs = await SharedPreferences.getInstance();
-    final favoritesJson = prefs.getString('favorites');
+    final favoritesJson = PreferencesManager.getString('favorites');
     if (favoritesJson != null) {
       final List<dynamic> favoritesList = jsonDecode(favoritesJson);
       setState(() {
-        _favorites = favoritesList.map((item) {
-          final map = item as Map<String, dynamic>;
-          final mediaItem = MediaItem(
-            id: map['id'],
-            title: map['title'],
-            album: map['album'],
-            artist: map['artist'],
-            artUri: map['artUri'] != null ? Uri.parse(map['artUri']) : null,
-          );
-          return {
-            'audioSource': ProgressiveAudioSource(
-              Uri.parse(map['id']),
-              tag: mediaItem,
-            ),
-            'runtime': map['runtime'],
-          };
-        }).toList();
+        _favorites =
+            favoritesList.map((item) {
+              final map = item as Map<String, dynamic>;
+              final mediaItem = MediaItem(
+                id: map['id'],
+                title: map['title'],
+                album: map['album'],
+                artist: map['artist'],
+                artUri: map['artUri'] != null ? Uri.parse(map['artUri']) : null,
+              );
+              return {
+                'audioSource': ProgressiveAudioSource(
+                  Uri.parse(map['id']),
+                  tag: mediaItem,
+                ),
+                'runtime': map['runtime'],
+              };
+            }).toList();
       });
     }
   }
 
   // Save preferences to shared preferences
   Future<void> _savePreferences() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('shuffleEnabled', _isShuffleEnabled);
-    await prefs.setString(
+    await PreferencesManager.setBool('shuffleEnabled', _isShuffleEnabled);
+    await PreferencesManager.setString(
       'loopMode',
       {
         LoopMode.off: 'off',
@@ -140,24 +241,28 @@ class _SearchScreenState extends State<SearchScreen> {
 
   // Save favorites to shared preferences
   Future<void> _saveFavorites() async {
-    final prefs = await SharedPreferences.getInstance();
-    final favoritesJson = jsonEncode(_favorites.map((song) {
-      final mediaItem = (song['audioSource'] as ProgressiveAudioSource).tag as MediaItem;
-      return {
-        'id': mediaItem.id,
-        'title': mediaItem.title,
-        'album': mediaItem.album,
-        'artist': mediaItem.artist,
-        'artUri': mediaItem.artUri?.toString(),
-        'runtime': song['runtime'],
-      };
-    }).toList());
-    await prefs.setString('favorites', favoritesJson);
+    final favoritesJson = jsonEncode(
+      _favorites.map((song) {
+        final mediaItem =
+            (song['audioSource'] as ProgressiveAudioSource).tag as MediaItem;
+        return {
+          'id': mediaItem.id,
+          'title': mediaItem.title,
+          'album': mediaItem.album,
+          'artist': mediaItem.artist,
+          'artUri': mediaItem.artUri?.toString(),
+          'runtime': song['runtime'],
+        };
+      }).toList(),
+    );
+    await PreferencesManager.setString('favorites', favoritesJson);
   }
 
   Future<List<Map<String, String>>> _fetchAlbumsAsync(String query) async {
     final formattedText = query.replaceAll(' ', '+');
-    final url = Uri.parse('https://downloads.khinsider.com/search?search=$formattedText');
+    final url = Uri.parse(
+      'https://downloads.khinsider.com/search?search=$formattedText',
+    );
     final response = await _httpClient.get(url);
     if (response.statusCode == 200) {
       return await compute(parseAlbumList, response.body);
@@ -183,7 +288,9 @@ class _SearchScreenState extends State<SearchScreen> {
       _player.play();
       setState(() {
         _currentSongIndex = index;
-        _currentSongUrl = (_playlist!.children[index] as ProgressiveAudioSource).uri.toString();
+        _currentSongUrl =
+            (_playlist!.children[index] as ProgressiveAudioSource).uri
+                .toString();
         _isFavoritesSelected = isFavorites;
       });
     } catch (e) {
@@ -229,31 +336,39 @@ class _SearchScreenState extends State<SearchScreen> {
       final response = await _httpClient.get(Uri.parse(fullUrl));
       if (response.statusCode == 200) {
         final imageUrl = _getHighResImageUrl(
-          html_parser.parse(response.body).querySelector('.albumImage img')?.attributes['src'] ?? '',
+          html_parser
+                  .parse(response.body)
+                  .querySelector('.albumImage img')
+                  ?.attributes['src'] ??
+              '',
         );
 
         final albumName = _selectedAlbum?['albumName'] ?? 'Unknown';
 
         setState(() {
-          _selectedAlbum = _selectedAlbum != null
-              ? {..._selectedAlbum!, 'imageUrl': imageUrl}
-              : {'imageUrl': imageUrl, 'albumName': albumName};
+          _selectedAlbum =
+              _selectedAlbum != null
+                  ? {..._selectedAlbum!, 'imageUrl': imageUrl}
+                  : {'imageUrl': imageUrl, 'albumName': albumName};
         });
 
         // Pass a serializable map to compute
         final songs = await compute(
-          (input) => parseSongList(input['body']!, input['albumName']!, input['imageUrl']!),
-          {
-            'body': response.body,
-            'albumName': albumName,
-            'imageUrl': imageUrl,
-          },
+          (input) => parseSongList(
+            input['body']!,
+            input['albumName']!,
+            input['imageUrl']!,
+          ),
+          {'body': response.body, 'albumName': albumName, 'imageUrl': imageUrl},
         );
 
         setState(() {
           _songs = songs;
           _playlist = ConcatenatingAudioSource(
-            children: songs.map((song) => song['audioSource'] as AudioSource).toList(),
+            children:
+                songs
+                    .map((song) => song['audioSource'] as AudioSource)
+                    .toList(),
           );
           // Reapply shuffle and loop settings
           _player.setShuffleModeEnabled(_isShuffleEnabled);
@@ -278,9 +393,18 @@ class _SearchScreenState extends State<SearchScreen> {
   // Toggle favorite status for a song
   void _toggleFavorite(Map<String, dynamic> song) {
     setState(() {
-      final mediaItem = (song['audioSource'] as ProgressiveAudioSource).tag as MediaItem;
-      if (_favorites.any((fav) => (fav['audioSource'] as ProgressiveAudioSource).tag.id == mediaItem.id)) {
-        _favorites.removeWhere((fav) => (fav['audioSource'] as ProgressiveAudioSource).tag.id == mediaItem.id);
+      final mediaItem =
+          (song['audioSource'] as ProgressiveAudioSource).tag as MediaItem;
+      if (_favorites.any(
+        (fav) =>
+            (fav['audioSource'] as ProgressiveAudioSource).tag.id ==
+            mediaItem.id,
+      )) {
+        _favorites.removeWhere(
+          (fav) =>
+              (fav['audioSource'] as ProgressiveAudioSource).tag.id ==
+              mediaItem.id,
+        );
       } else {
         _favorites.add(song);
       }
@@ -290,7 +414,10 @@ class _SearchScreenState extends State<SearchScreen> {
 
   // Check if a song is favorited
   bool _isFavorited(MediaItem mediaItem) {
-    return _favorites.any((fav) => (fav['audioSource'] as ProgressiveAudioSource).tag.id == mediaItem.id);
+    return _favorites.any(
+      (fav) =>
+          (fav['audioSource'] as ProgressiveAudioSource).tag.id == mediaItem.id,
+    );
   }
 
   Widget _buildAlbumList() {
@@ -310,18 +437,21 @@ class _SearchScreenState extends State<SearchScreen> {
             itemBuilder: (context, index) {
               final album = _albums[index];
               return ListTile(
-                leading: album['imageUrl']!.isNotEmpty
-                    ? CircleAvatar(
-                        backgroundImage: NetworkImage(album['imageUrl']!),
-                        radius: 30,
-                      )
-                    : const CircleAvatar(
-                        backgroundColor: Colors.grey,
-                        radius: 30,
-                        child: Icon(Icons.music_note, color: Colors.white),
-                      ),
+                leading:
+                    album['imageUrl']!.isNotEmpty
+                        ? CircleAvatar(
+                          backgroundImage: NetworkImage(album['imageUrl']!),
+                          radius: 30,
+                        )
+                        : const CircleAvatar(
+                          backgroundColor: Colors.grey,
+                          radius: 30,
+                          child: Icon(Icons.music_note, color: Colors.white),
+                        ),
                 title: Text(album['albumName']!),
-                subtitle: Text('${album['type']} - ${album['year']} | ${album['platform']}'),
+                subtitle: Text(
+                  '${album['type']} - ${album['year']} | ${album['platform']}',
+                ),
                 onTap: () {
                   setState(() {
                     _selectedAlbum = album;
@@ -346,22 +476,23 @@ class _SearchScreenState extends State<SearchScreen> {
       children: [
         const SizedBox(height: 16),
         Center(
-          child: _selectedAlbum?['imageUrl']?.isNotEmpty == true
-              ? ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.network(
-                    _selectedAlbum!['imageUrl']!,
+          child:
+              _selectedAlbum?['imageUrl']?.isNotEmpty == true
+                  ? ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.network(
+                      _selectedAlbum!['imageUrl']!,
+                      width: 200,
+                      height: 200,
+                      fit: BoxFit.cover,
+                    ),
+                  )
+                  : Container(
                     width: 200,
                     height: 200,
-                    fit: BoxFit.cover,
+                    color: Colors.grey[300],
+                    child: const Icon(Icons.music_note, size: 100),
                   ),
-                )
-              : Container(
-                  width: 200,
-                  height: 200,
-                  color: Colors.grey[300],
-                  child: const Icon(Icons.music_note, size: 100),
-                ),
         ),
         const SizedBox(height: 12),
         Text(
@@ -386,7 +517,9 @@ class _SearchScreenState extends State<SearchScreen> {
             subtitle: Text(song['runtime'] ?? 'Unknown'),
             trailing: IconButton(
               icon: Icon(
-                _isFavorited(mediaItem) ? Icons.favorite : Icons.favorite_border,
+                _isFavorited(mediaItem)
+                    ? Icons.favorite
+                    : Icons.favorite_border,
                 color: _isFavorited(mediaItem) ? Colors.red : null,
               ),
               onPressed: () => _toggleFavorite(song),
@@ -399,7 +532,8 @@ class _SearchScreenState extends State<SearchScreen> {
             },
           );
         }),
-        if (_currentSongUrl != null) const SizedBox(height: 70), // Add padding for miniplayer
+        if (_currentSongUrl != null)
+          const SizedBox(height: 70), // Add padding for miniplayer
       ],
     );
   }
@@ -411,7 +545,8 @@ class _SearchScreenState extends State<SearchScreen> {
 
     // Create playlist for favorites
     _playlist = ConcatenatingAudioSource(
-      children: _favorites.map((song) => song['audioSource'] as AudioSource).toList(),
+      children:
+          _favorites.map((song) => song['audioSource'] as AudioSource).toList(),
     );
 
     return ListView(
@@ -438,21 +573,26 @@ class _SearchScreenState extends State<SearchScreen> {
           final audioSource = song['audioSource'] as ProgressiveAudioSource;
           final mediaItem = audioSource.tag as MediaItem;
           return ListTile(
-            leading: mediaItem.artUri != null
-                ? CircleAvatar(
-                    backgroundImage: NetworkImage(mediaItem.artUri.toString()),
-                    radius: 30,
-                  )
-                : const CircleAvatar(
-                    backgroundColor: Colors.grey,
-                    radius: 30,
-                    child: Icon(Icons.music_note, color: Colors.white),
-                  ),
+            leading:
+                mediaItem.artUri != null
+                    ? CircleAvatar(
+                      backgroundImage: NetworkImage(
+                        mediaItem.artUri.toString(),
+                      ),
+                      radius: 30,
+                    )
+                    : const CircleAvatar(
+                      backgroundColor: Colors.grey,
+                      radius: 30,
+                      child: Icon(Icons.music_note, color: Colors.white),
+                    ),
             title: Text(mediaItem.title ?? 'Unknown'),
             subtitle: Text(song['runtime'] ?? 'Unknown'),
             trailing: IconButton(
               icon: Icon(
-                _isFavorited(mediaItem) ? Icons.favorite : Icons.favorite_border,
+                _isFavorited(mediaItem)
+                    ? Icons.favorite
+                    : Icons.favorite_border,
                 color: _isFavorited(mediaItem) ? Colors.red : null,
               ),
               onPressed: () => _toggleFavorite(song),
@@ -465,7 +605,8 @@ class _SearchScreenState extends State<SearchScreen> {
             },
           );
         }),
-        if (_currentSongUrl != null) const SizedBox(height: 70), // Add padding for miniplayer
+        if (_currentSongUrl != null)
+          const SizedBox(height: 70), // Add padding for miniplayer
       ],
     );
   }
@@ -486,7 +627,12 @@ class _SearchScreenState extends State<SearchScreen> {
         height: MediaQuery.of(context).size.height,
         width: MediaQuery.of(context).size.width,
         color: Colors.white,
-        padding: const EdgeInsets.only(top: 40, left: 20, right: 20, bottom: 40),
+        padding: const EdgeInsets.only(
+          top: 40,
+          left: 20,
+          right: 20,
+          bottom: 40,
+        ),
         child: Column(
           children: [
             Align(
@@ -496,7 +642,9 @@ class _SearchScreenState extends State<SearchScreen> {
                 onPressed: () {
                   setState(() {
                     _isPlayerExpanded = false;
-                    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+                    SystemChrome.setEnabledSystemUIMode(
+                      SystemUiMode.edgeToEdge,
+                    );
                   });
                 },
               ),
@@ -532,7 +680,9 @@ class _SearchScreenState extends State<SearchScreen> {
             ),
             IconButton(
               icon: Icon(
-                _isFavorited(mediaItem) ? Icons.favorite : Icons.favorite_border,
+                _isFavorited(mediaItem)
+                    ? Icons.favorite
+                    : Icons.favorite_border,
                 color: _isFavorited(mediaItem) ? Colors.red : null,
               ),
               onPressed: () => _toggleFavorite(song),
@@ -547,7 +697,10 @@ class _SearchScreenState extends State<SearchScreen> {
                 return Column(
                   children: [
                     Slider(
-                      value: position.inSeconds.toDouble().clamp(0.0, duration.inSeconds.toDouble()),
+                      value: position.inSeconds.toDouble().clamp(
+                        0.0,
+                        duration.inSeconds.toDouble(),
+                      ),
                       min: 0.0,
                       max: duration.inSeconds.toDouble(),
                       onChanged: (value) {
@@ -608,10 +761,9 @@ class _SearchScreenState extends State<SearchScreen> {
                 IconButton(
                   iconSize: 40.0,
                   icon: Icon(
-                    _loopMode == LoopMode.one
-                        ? Icons.repeat_one
-                        : Icons.repeat,
-                    color: _loopMode != LoopMode.off ? Colors.blue : Colors.grey,
+                    _loopMode == LoopMode.one ? Icons.repeat_one : Icons.repeat,
+                    color:
+                        _loopMode != LoopMode.off ? Colors.blue : Colors.grey,
                   ),
                   onPressed: _toggleLoopMode,
                 ),
@@ -673,7 +825,9 @@ class _SearchScreenState extends State<SearchScreen> {
               ),
               IconButton(
                 icon: Icon(
-                  _isFavorited(mediaItem) ? Icons.favorite : Icons.favorite_border,
+                  _isFavorited(mediaItem)
+                      ? Icons.favorite
+                      : Icons.favorite_border,
                   color: _isFavorited(mediaItem) ? Colors.red : null,
                 ),
                 onPressed: () => _toggleFavorite(song),
@@ -710,7 +864,10 @@ class _SearchScreenState extends State<SearchScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: _isPlayerExpanded ? null : AppBar(title: const Text('KHInsider Search')),
+      appBar:
+          _isPlayerExpanded
+              ? null
+              : AppBar(title: const Text('KHInsider Search')),
       body: Stack(
         children: [
           Padding(
@@ -731,9 +888,12 @@ class _SearchScreenState extends State<SearchScreen> {
                   const SizedBox(height: 16),
                 ],
                 Expanded(
-                  child: _currentNavIndex == 0
-                      ? (_selectedAlbum == null ? _buildAlbumList() : _buildSongList())
-                      : _buildFavoritesList(),
+                  child:
+                      _currentNavIndex == 0
+                          ? (_selectedAlbum == null
+                              ? _buildAlbumList()
+                              : _buildSongList())
+                          : _buildFavoritesList(),
                 ),
               ],
             ),
@@ -743,44 +903,135 @@ class _SearchScreenState extends State<SearchScreen> {
               alignment: Alignment.bottomCenter,
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 300),
-                child: _isPlayerExpanded ? _buildExpandedPlayer() : _buildMiniPlayer(),
+                child:
+                    _isPlayerExpanded
+                        ? _buildExpandedPlayer()
+                        : _buildMiniPlayer(),
               ),
             ),
         ],
       ),
-      bottomNavigationBar: _isPlayerExpanded
-          ? null
-          : BottomNavigationBar(
-              currentIndex: _currentNavIndex,
-              onTap: (index) {
-                setState(() {
-                  _currentNavIndex = index;
-                  if (index == 0) {
-                    // Reset to search page
-                    _selectedAlbum = null;
-                    _songs = [];
-                    _playlist = null;
-                    _currentSongIndex = 0;
-                    _currentSongUrl = null;
-                    _isFavoritesSelected = false;
-                  } else {
-                    // Favorites page
-                    _selectedAlbum = null;
-                    _songs = [];
-                    _isFavoritesSelected = true;
-                    if (_favorites.isNotEmpty) {
-                      _playlist = ConcatenatingAudioSource(
-                        children: _favorites.map((song) => song['audioSource'] as AudioSource).toList(),
-                      );
+      bottomNavigationBar:
+          _isPlayerExpanded
+              ? null
+              : BottomNavigationBar(
+                currentIndex: _currentNavIndex,
+                onTap: (index) {
+                  setState(() {
+                    _currentNavIndex = index;
+                    if (index == 0) {
+                      // Search page
+                      _selectedAlbum = null;
+                      _songs = [];
+                      _playlist = null;
+                      _currentSongIndex = 0;
+                      _currentSongUrl = null;
+                      _isFavoritesSelected = false;
+                    } else if (index == 1) {
+                      // Favorites page
+                      _selectedAlbum = null;
+                      _songs = [];
+                      _isFavoritesSelected = true;
+                      if (_favorites.isNotEmpty) {
+                        _playlist = ConcatenatingAudioSource(
+                          children:
+                              _favorites
+                                  .map(
+                                    (song) =>
+                                        song['audioSource'] as AudioSource,
+                                  )
+                                  .toList(),
+                        );
+                      }
+                    } else if (index == 2) {
+                      // Settings page
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const SettingsScreen(),
+                        ),
+                      ).then((_) {
+                        setState(() {
+                          _currentNavIndex = 0; // Return to search page
+                        });
+                      });
                     }
-                  }
-                });
+                  });
+                },
+                items: const [
+                  BottomNavigationBarItem(
+                    icon: Icon(Icons.search),
+                    label: 'Search',
+                  ),
+                  BottomNavigationBarItem(
+                    icon: Icon(Icons.favorite),
+                    label: 'Favorites',
+                  ),
+                  BottomNavigationBarItem(
+                    icon: Icon(Icons.settings),
+                    label: 'Settings',
+                  ),
+                ],
+              ),
+    );
+  }
+}
+
+class SettingsScreen extends StatelessWidget {
+  const SettingsScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Settings')),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            ElevatedButton(
+              onPressed: () async {
+                final file = await PreferencesManager.exportPreferences();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('Preferences exported to ${file.path}'),
+                  ),
+                );
               },
-              items: const [
-                BottomNavigationBarItem(icon: Icon(Icons.search), label: 'Search'),
-                BottomNavigationBarItem(icon: Icon(Icons.favorite), label: 'Favorites'),
-              ],
+              child: const Text('Export Preferences'),
             ),
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: () async {
+                final result = await FilePicker.platform.pickFiles(
+                  type: FileType.custom,
+                  allowedExtensions: ['json'],
+                );
+                if (result != null && result.files.single.path != null) {
+                  final file = File(result.files.single.path!);
+                  final success = await PreferencesManager.importPreferences(
+                    file,
+                  );
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        success
+                            ? 'Preferences imported successfully'
+                            : 'Failed to import preferences',
+                      ),
+                    ),
+                  );
+                  // Optionally, reload the app state
+                  Navigator.pushReplacement(
+                    context,
+                    MaterialPageRoute(builder: (context) => const SearchApp()),
+                  );
+                }
+              },
+              child: const Text('Import Preferences'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -794,7 +1045,8 @@ List<Map<String, String>> parseAlbumList(String htmlBody) {
         final cols = row.querySelectorAll('td');
         if (cols.length < 5) return null;
 
-        final albumName = '${cols[1].querySelector('a')?.text.trim() ?? ''} ${cols[1].querySelector('span')?.text.trim() ?? ''}';
+        final albumName =
+            '${cols[1].querySelector('a')?.text.trim() ?? ''} ${cols[1].querySelector('span')?.text.trim() ?? ''}';
         final platform = cols[2].text.trim();
         final type = cols[3].text.trim();
         final year = cols[4].text.trim();
@@ -814,7 +1066,11 @@ List<Map<String, String>> parseAlbumList(String htmlBody) {
       .toList();
 }
 
-Future<List<Map<String, dynamic>>> parseSongList(String htmlBody, String albumName, String albumImageUrl) async {
+Future<List<Map<String, dynamic>>> parseSongList(
+  String htmlBody,
+  String albumName,
+  String albumImageUrl,
+) async {
   final document = html_parser.parse(htmlBody);
   final rows = document.querySelectorAll('#songlist tr');
   final List<Map<String, dynamic>> songs = [];
@@ -834,25 +1090,29 @@ Future<List<Map<String, dynamic>>> parseSongList(String htmlBody, String albumNa
 
     // Add a future for fetching the MP3 URL
     futures.add(
-      pool.withResource(() => _fetchActualMp3UrlStatic(detailUrl).then((mp3Url) {
-        final audioSource = ProgressiveAudioSource(
-          Uri.parse(mp3Url),
-          tag: MediaItem(
-            id: mp3Url,
-            title: name,
-            album: albumName,
-            artist: albumName,
-            artUri: albumImageUrl.isNotEmpty ? Uri.parse(albumImageUrl) : null,
-          ),
-        );
-        return {
-          'audioSource': audioSource,
-          'runtime': runtime,
-        };
-      }).catchError((e) {
-        debugPrint('Error fetching MP3 URL for $name: $e');
-        return null; // Skip failed songs
-      })),
+      pool.withResource(
+        () => _fetchActualMp3UrlStatic(detailUrl)
+            .then((mp3Url) {
+              final audioSource = ProgressiveAudioSource(
+                Uri.parse(mp3Url),
+                tag: MediaItem(
+                  id: mp3Url,
+                  title: name,
+                  album: albumName,
+                  artist: albumName,
+                  artUri:
+                      albumImageUrl.isNotEmpty
+                          ? Uri.parse(albumImageUrl)
+                          : null,
+                ),
+              );
+              return {'audioSource': audioSource, 'runtime': runtime};
+            })
+            .catchError((e) {
+              debugPrint('Error fetching MP3 URL for $name: $e');
+              return null; // Skip failed songs
+            }),
+      ),
     );
   }
 
@@ -869,10 +1129,12 @@ Future<String> _fetchActualMp3UrlStatic(String detailPageUrl) async {
     final response = await client.get(Uri.parse(detailPageUrl));
     if (response.statusCode == 200) {
       final document = html_parser.parse(response.body);
-      final mp3Anchor = document.querySelectorAll('a').firstWhere(
-        (a) => a.attributes['href']?.endsWith('.mp3') ?? false,
-        orElse: () => throw Exception('MP3 link not found'),
-      );
+      final mp3Anchor = document
+          .querySelectorAll('a')
+          .firstWhere(
+            (a) => a.attributes['href']?.endsWith('.mp3') ?? false,
+            orElse: () => throw Exception('MP3 link not found'),
+          );
       return mp3Anchor.attributes['href']!;
     }
     throw Exception('Failed to load MP3 URL');
