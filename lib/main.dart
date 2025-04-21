@@ -157,6 +157,9 @@ class _SearchScreenState extends State<SearchScreen> {
   int _currentNavIndex = 0;
   bool _isFavoritesSelected = false;
 
+  List<String> _albumTypes = ['All']; // Initialize with 'All' option
+  String _selectedType = 'All';
+
   @override
   void initState() {
     super.initState();
@@ -433,39 +436,97 @@ class _SearchScreenState extends State<SearchScreen> {
           return const Center(child: Text('No albums found.'));
         } else {
           _albums = snapshot.data!;
-          return ListView.builder(
-            itemCount: _albums.length,
-            itemBuilder: (context, index) {
-              final album = _albums[index];
-              return ListTile(
-                leading:
-                    album['imageUrl']!.isNotEmpty
-                        ? CircleAvatar(
-                          backgroundImage: NetworkImage(album['imageUrl']!),
-                          radius: 30,
-                        )
-                        : const CircleAvatar(
-                          backgroundColor: Colors.grey,
-                          radius: 30,
-                          child: Icon(Icons.music_note, color: Colors.white),
-                        ),
-                title: Text(album['albumName']!),
-                subtitle: Text(
-                  '${album['type']} - ${album['year']} | ${album['platform']}',
+          // Update the list of unique album types, including "None" for empty types
+          final types =
+              _albums
+                  .map(
+                    (album) => album['type']!.isEmpty ? 'None' : album['type']!,
+                  )
+                  .toSet()
+                  .toList()
+                ..sort();
+          _albumTypes = ['All', ...types];
+
+          // Filter albums based on selected type
+          final filteredAlbums =
+              _selectedType == 'All'
+                  ? _albums
+                  : _albums
+                      .where(
+                        (album) =>
+                            (album['type']!.isEmpty
+                                ? 'None'
+                                : album['type']!) ==
+                            _selectedType,
+                      )
+                      .toList();
+
+          return Column(
+            children: [
+              // Type filter dropdown
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                child: DropdownButton<String>(
+                  value: _selectedType,
+                  isExpanded: true,
+                  hint: const Text('Filter by Type'),
+                  items:
+                      _albumTypes.map((type) {
+                        return DropdownMenuItem<String>(
+                          value: type,
+                          child: Text(type),
+                        );
+                      }).toList(),
+                  onChanged: (value) {
+                    setState(() {
+                      _selectedType = value ?? 'All';
+                    });
+                  },
                 ),
-                onTap: () {
-                  setState(() {
-                    _selectedAlbum = album;
-                    _songs = [];
-                    _playlist = null;
-                    _currentSongIndex = 0;
-                    _currentSongUrl = null;
-                    _isFavoritesSelected = false;
-                  });
-                  _fetchAlbumPage(album['albumUrl']!);
-                },
-              );
-            },
+              ),
+              const SizedBox(height: 8),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: filteredAlbums.length,
+                  itemBuilder: (context, index) {
+                    final album = filteredAlbums[index];
+                    return ListTile(
+                      leading:
+                          album['imageUrl']!.isNotEmpty
+                              ? CircleAvatar(
+                                backgroundImage: NetworkImage(
+                                  album['imageUrl']!,
+                                ),
+                                radius: 30,
+                              )
+                              : const CircleAvatar(
+                                backgroundColor: Colors.grey,
+                                radius: 30,
+                                child: Icon(
+                                  Icons.music_note,
+                                  color: Colors.white,
+                                ),
+                              ),
+                      title: Text(album['albumName']!),
+                      subtitle: Text(
+                        '${album['type']!.isEmpty ? 'None' : album['type']} - ${album['year']} | ${album['platform']}',
+                      ),
+                      onTap: () {
+                        setState(() {
+                          _selectedAlbum = album;
+                          _songs = [];
+                          _playlist = null;
+                          _currentSongIndex = 0;
+                          _currentSongUrl = null;
+                          _isFavoritesSelected = false;
+                        });
+                        _fetchAlbumPage(album['albumUrl']!);
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
           );
         }
       },
