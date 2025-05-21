@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:html/parser.dart' as html_parser;
-import 'package:flutter/foundation.dart'; // for compute()
+import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:pool/pool.dart';
@@ -13,17 +13,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:app_links/app_links.dart';
 
 class PreferencesManager {
   static const String _backupFileName = 'shared_prefs_backup.json';
   static SharedPreferences? _prefs;
 
-  // Initialize SharedPreferences
   static Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
   }
 
-  // Setters with backup
   static Future<bool> setBool(String key, bool value) async {
     final result = await _prefs!.setBool(key, value);
     await _backupPreferences();
@@ -36,13 +35,9 @@ class PreferencesManager {
     return result;
   }
 
-  // Add other setters as needed (setInt, setDouble, etc.)
-
-  // Getters
   static bool? getBool(String key) => _prefs!.getBool(key);
   static String? getString(String key) => _prefs!.getString(key);
 
-  // Backup preferences to a file
   static Future<void> _backupPreferences() async {
     try {
       final prefsMap = _prefs!.getKeys().fold<Map<String, dynamic>>({}, (
@@ -63,11 +58,12 @@ class PreferencesManager {
     }
   }
 
-  // Export preferences to a user-accessible file
   static Future<File> exportPreferences() async {
     final directory = await getApplicationDocumentsDirectory();
     final backupFile = File('${directory.path}/$_backupFileName');
-    final exportFile = File('${directory.path}/shared_prefs_export.pdf');
+    final exportFile = File(
+      '${directory.path}/shared_prefs_export.json',
+    ); // Changed to .json
 
     if (await backupFile.exists()) {
       await backupFile.copy(exportFile.path);
@@ -79,13 +75,12 @@ class PreferencesManager {
     return exportFile;
   }
 
-  // Import preferences from a file
   static Future<bool> importPreferences(File file) async {
     try {
       final jsonString = await file.readAsString();
       final prefsMap = jsonDecode(jsonString) as Map<String, dynamic>;
 
-      await _prefs!.clear(); // Clear existing preferences
+      await _prefs!.clear();
       for (final entry in prefsMap.entries) {
         if (entry.value is bool) {
           await _prefs!.setBool(entry.key, entry.value);
@@ -99,7 +94,7 @@ class PreferencesManager {
           await _prefs!.setStringList(entry.key, entry.value);
         }
       }
-      await _backupPreferences(); // Backup after import
+      await _backupPreferences();
       debugPrint('Preferences imported from ${file.path}');
       return true;
     } catch (e) {
@@ -116,7 +111,7 @@ Future<void> main() async {
     androidNotificationChannelName: 'Audio playback',
     androidNotificationOngoing: true,
   );
-  await PreferencesManager.init(); // Initialize PreferencesManager
+  await PreferencesManager.init();
   runApp(const SearchApp());
 }
 
@@ -125,7 +120,7 @@ class SearchApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(home: SearchScreen());
+    return MaterialApp(home: const SearchScreen(), theme: ThemeData.light());
   }
 }
 
@@ -139,52 +134,136 @@ class SearchScreen extends StatefulWidget {
 class _SearchScreenState extends State<SearchScreen> {
   final TextEditingController _searchController = TextEditingController();
   final http.Client _httpClient = http.Client();
-
   final AudioPlayer _player = AudioPlayer();
+  final AppLinks _appLinks = AppLinks();
   String? _currentSongUrl;
   int _currentSongIndex = 0;
   bool _isPlayerExpanded = false;
   bool _isShuffleEnabled = false;
-  LoopMode _loopMode = LoopMode.off; // off, one, all
-
+  LoopMode _loopMode = LoopMode.off;
   List<Map<String, String>> _albums = [];
   ConcatenatingAudioSource? _playlist;
-  List<Map<String, dynamic>> _songs = []; // Stores AudioSource and runtime
+  List<Map<String, dynamic>> _songs = [];
   Map<String, String>? _selectedAlbum;
-
-  // Favorites list to store MediaItems and runtime
   List<Map<String, dynamic>> _favorites = [];
   int _currentNavIndex = 0;
   bool _isFavoritesSelected = false;
-
-  List<String> _albumTypes = ['All']; // Initialize with 'All' option
+  List<String> _albumTypes = ['All'];
   String _selectedType = 'All';
+  StreamSubscription? _uriLinkSubscription;
 
   @override
   void initState() {
     super.initState();
     _loadPreferences();
+    _initDeepLinks();
     _player.sequenceStateStream.listen((state) {
       if (state == null) return;
       final index = state.currentIndex;
       setState(() {
         _currentSongIndex = index;
         _currentSongUrl =
-            (_playlist?.children[index] as ProgressiveAudioSource).uri
-                .toString();
+            _playlist != null && index < _playlist!.children.length
+                ? (_playlist!.children[index] as ProgressiveAudioSource).uri
+                    .toString()
+                : null;
       });
     });
   }
 
   @override
   void dispose() {
+    _uriLinkSubscription?.cancel();
     _player.dispose();
     _httpClient.close();
     _searchController.dispose();
     super.dispose();
   }
 
-  // Load preferences from shared preferences
+  Future<void> _initDeepLinks() async {
+    try {
+      final initialUri = await _appLinks.getInitialLink();
+      if (initialUri != null) {
+        await _handleDeepLink(initialUri);
+      }
+    } catch (e) {
+      debugPrint('Error getting initial URI: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to process initial link: $e')),
+      );
+    }
+
+    _uriLinkSubscription = _appLinks.uriLinkStream.listen(
+      (Uri? uri) {
+        if (uri != null) {
+          _handleDeepLink(uri);
+        }
+      },
+      onError: (e) {
+        debugPrint('Error in URI stream: $e');
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Failed to process link: $e')));
+      },
+    );
+  }
+
+  Future<void> _handleDeepLink(Uri uri) async {
+    if (uri.host != 'downloads.khinsider.com' ||
+        !uri.path.startsWith('/game-soundtracks/album')) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Unsupported deep link.')));
+      return;
+    }
+
+    final albumUrl = uri.path;
+    final songIndex = int.tryParse(uri.queryParameters['song'] ?? '');
+
+    setState(() {
+      _selectedAlbum = {
+        'albumUrl': albumUrl,
+        'albumName': 'Unknown',
+        'imageUrl': '',
+        'type': '',
+        'year': '',
+        'platform': '',
+      };
+      _songs = [];
+      _playlist = null;
+      _currentSongIndex = 0;
+      _currentSongUrl = null;
+      _isFavoritesSelected = false;
+      _isPlayerExpanded =
+          songIndex != null; // Only expand player if songIndex is provided
+    });
+
+    try {
+      await _fetchAlbumPage(albumUrl);
+      if (songIndex != null &&
+          songIndex >= 0 &&
+          _songs.isNotEmpty &&
+          songIndex < _songs.length) {
+        await _playAudioSourceAtIndex(songIndex, false);
+        setState(() {
+          _isPlayerExpanded = true;
+        });
+      } else if (songIndex != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Invalid song index or album not found.'),
+          ),
+        );
+      }
+      // If no songIndex, just show the album details (song list), no snackbar needed
+    } catch (e) {
+      debugPrint('Error handling deep link: $e');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to load album: $e')));
+    }
+  }
+
   Future<void> _loadPreferences() async {
     setState(() {
       _isShuffleEnabled = PreferencesManager.getBool('shuffleEnabled') ?? false;
@@ -202,7 +281,6 @@ class _SearchScreenState extends State<SearchScreen> {
     _loadFavorites();
   }
 
-  // Load favorites from shared preferences
   Future<void> _loadFavorites() async {
     final favoritesJson = PreferencesManager.getString('favorites');
     if (favoritesJson != null) {
@@ -224,13 +302,14 @@ class _SearchScreenState extends State<SearchScreen> {
                   tag: mediaItem,
                 ),
                 'runtime': map['runtime'],
+                'albumUrl': map['albumUrl'],
+                'index': map['index'],
               };
             }).toList();
       });
     }
   }
 
-  // Save preferences to shared preferences
   Future<void> _savePreferences() async {
     await PreferencesManager.setBool('shuffleEnabled', _isShuffleEnabled);
     await PreferencesManager.setString(
@@ -243,7 +322,6 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
-  // Save favorites to shared preferences
   Future<void> _saveFavorites() async {
     final favoritesJson = jsonEncode(
       _favorites.map((song) {
@@ -256,6 +334,8 @@ class _SearchScreenState extends State<SearchScreen> {
           'artist': mediaItem.artist,
           'artUri': mediaItem.artUri?.toString(),
           'runtime': song['runtime'],
+          'albumUrl': song['albumUrl'],
+          'index': song['index'],
         };
       }).toList(),
     );
@@ -287,7 +367,14 @@ class _SearchScreenState extends State<SearchScreen> {
 
   Future<void> _playAudioSourceAtIndex(int index, bool isFavorites) async {
     try {
-      if (_playlist == null || index >= _playlist!.length) return;
+      if (_playlist == null || index >= _playlist!.children.length) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Cannot play song: invalid playlist or index.'),
+          ),
+        );
+        return;
+      }
       await _player.setAudioSource(_playlist!, initialIndex: index);
       _player.play();
       setState(() {
@@ -299,6 +386,9 @@ class _SearchScreenState extends State<SearchScreen> {
       });
     } catch (e) {
       debugPrint('Error playing audio: $e');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to play song: $e')));
     }
   }
 
@@ -348,22 +438,34 @@ class _SearchScreenState extends State<SearchScreen> {
         );
 
         final albumName = _selectedAlbum?['albumName'] ?? 'Unknown';
+        final type = _selectedAlbum?['type'] ?? '';
+        final year = _selectedAlbum?['year'] ?? '';
+        final platform = _selectedAlbum?['platform'] ?? '';
 
         setState(() {
-          _selectedAlbum =
-              _selectedAlbum != null
-                  ? {..._selectedAlbum!, 'imageUrl': imageUrl}
-                  : {'imageUrl': imageUrl, 'albumName': albumName};
+          _selectedAlbum = {
+            'imageUrl': imageUrl,
+            'albumName': albumName,
+            'albumUrl': albumUrl,
+            'type': type,
+            'year': year,
+            'platform': platform,
+          };
         });
 
-        // Pass a serializable map to compute
         final songs = await compute(
           (input) => parseSongList(
             input['body']!,
             input['albumName']!,
             input['imageUrl']!,
+            input['albumUrl']!,
           ),
-          {'body': response.body, 'albumName': albumName, 'imageUrl': imageUrl},
+          {
+            'body': response.body,
+            'albumName': albumName,
+            'imageUrl': imageUrl,
+            'albumUrl': albumUrl,
+          },
         );
 
         setState(() {
@@ -374,7 +476,6 @@ class _SearchScreenState extends State<SearchScreen> {
                     .map((song) => song['audioSource'] as AudioSource)
                     .toList(),
           );
-          // Reapply shuffle and loop settings
           _player.setShuffleModeEnabled(_isShuffleEnabled);
           if (_isShuffleEnabled) {
             _player.shuffle();
@@ -384,9 +485,11 @@ class _SearchScreenState extends State<SearchScreen> {
         });
       } else {
         debugPrint('Error: ${response.statusCode}');
+        throw Exception('Failed to load album page: ${response.statusCode}');
       }
     } catch (e) {
       debugPrint('Error occurred while fetching album page: $e');
+      throw e; // Rethrow to be caught in _handleDeepLink
     }
   }
 
@@ -394,7 +497,6 @@ class _SearchScreenState extends State<SearchScreen> {
     return url.replaceFirst('/thumbs/', '/');
   }
 
-  // Toggle favorite status for a song
   void _toggleFavorite(Map<String, dynamic> song) {
     setState(() {
       final mediaItem =
@@ -416,12 +518,25 @@ class _SearchScreenState extends State<SearchScreen> {
     _saveFavorites();
   }
 
-  // Check if a song is favorited
   bool _isFavorited(MediaItem mediaItem) {
     return _favorites.any(
       (fav) =>
           (fav['audioSource'] as ProgressiveAudioSource).tag.id == mediaItem.id,
     );
+  }
+
+  void _shareAlbum(String albumUrl) {
+    final shareUrl = 'https://downloads.khinsider.com$albumUrl';
+    Share.share(shareUrl, subject: 'Check out this album!');
+  }
+
+  void _shareSong(Map<String, dynamic> song) {
+    final albumUrl = song['albumUrl'] as String;
+    final index = song['index'] as int;
+    final albumIndex = index - 1;
+    final shareUrl =
+        'https://downloads.khinsider.com$albumUrl?song=$albumIndex';
+    Share.share(shareUrl, subject: 'Check out this song!');
   }
 
   Widget _buildAlbumList() {
@@ -436,7 +551,6 @@ class _SearchScreenState extends State<SearchScreen> {
           return const Center(child: Text('No albums found.'));
         } else {
           _albums = snapshot.data!;
-          // Update the list of unique album types, including "None" for empty types
           final types =
               _albums
                   .map(
@@ -447,7 +561,6 @@ class _SearchScreenState extends State<SearchScreen> {
                 ..sort();
           _albumTypes = ['All', ...types];
 
-          // Filter albums based on selected type
           final filteredAlbums =
               _selectedType == 'All'
                   ? _albums
@@ -463,7 +576,6 @@ class _SearchScreenState extends State<SearchScreen> {
 
           return Column(
             children: [
-              // Type filter dropdown
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 8.0),
                 child: DropdownButton<String>(
@@ -534,12 +646,15 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   Widget _buildSongList() {
+    if (_selectedAlbum == null) {
+      return const Center(child: Text('No album selected.'));
+    }
     return ListView(
       children: [
         const SizedBox(height: 16),
         Center(
           child:
-              _selectedAlbum?['imageUrl']?.isNotEmpty == true
+              _selectedAlbum!['imageUrl']?.isNotEmpty == true
                   ? ClipRRect(
                     borderRadius: BorderRadius.circular(8),
                     child: Image.network(
@@ -557,14 +672,22 @@ class _SearchScreenState extends State<SearchScreen> {
                   ),
         ),
         const SizedBox(height: 12),
-        Text(
-          _selectedAlbum!['albumName']!,
-          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-          textAlign: TextAlign.center,
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              _selectedAlbum!['albumName'] ?? 'Unknown',
+              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            IconButton(
+              icon: const Icon(Icons.share),
+              onPressed: () => _shareAlbum(_selectedAlbum!['albumUrl']!),
+            ),
+          ],
         ),
         const SizedBox(height: 4),
         Text(
-          '${_selectedAlbum!['type']} - ${_selectedAlbum!['year']} | ${_selectedAlbum!['platform']}',
+          '${_selectedAlbum!['type']?.isEmpty == true ? 'None' : _selectedAlbum!['type']} - ${_selectedAlbum!['year']} | ${_selectedAlbum!['platform']}',
           style: const TextStyle(color: Colors.grey),
           textAlign: TextAlign.center,
         ),
@@ -577,14 +700,23 @@ class _SearchScreenState extends State<SearchScreen> {
           return ListTile(
             title: Text(audioSource.tag.title ?? 'Unknown'),
             subtitle: Text(song['runtime'] ?? 'Unknown'),
-            trailing: IconButton(
-              icon: Icon(
-                _isFavorited(mediaItem)
-                    ? Icons.favorite
-                    : Icons.favorite_border,
-                color: _isFavorited(mediaItem) ? Colors.red : null,
-              ),
-              onPressed: () => _toggleFavorite(song),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  icon: Icon(
+                    _isFavorited(mediaItem)
+                        ? Icons.favorite
+                        : Icons.favorite_border,
+                    color: _isFavorited(mediaItem) ? Colors.red : null,
+                  ),
+                  onPressed: () => _toggleFavorite(song),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.share),
+                  onPressed: () => _shareSong(song),
+                ),
+              ],
             ),
             onTap: () {
               setState(() {
@@ -594,8 +726,7 @@ class _SearchScreenState extends State<SearchScreen> {
             },
           );
         }),
-        if (_currentSongUrl != null)
-          const SizedBox(height: 70), // Add padding for miniplayer
+        if (_currentSongUrl != null) const SizedBox(height: 70),
       ],
     );
   }
@@ -605,7 +736,6 @@ class _SearchScreenState extends State<SearchScreen> {
       return const Center(child: Text('No favorite songs yet.'));
     }
 
-    // Create playlist for favorites
     _playlist = ConcatenatingAudioSource(
       children:
           _favorites.map((song) => song['audioSource'] as AudioSource).toList(),
@@ -650,14 +780,23 @@ class _SearchScreenState extends State<SearchScreen> {
                     ),
             title: Text(mediaItem.title ?? 'Unknown'),
             subtitle: Text(song['runtime'] ?? 'Unknown'),
-            trailing: IconButton(
-              icon: Icon(
-                _isFavorited(mediaItem)
-                    ? Icons.favorite
-                    : Icons.favorite_border,
-                color: _isFavorited(mediaItem) ? Colors.red : null,
-              ),
-              onPressed: () => _toggleFavorite(song),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  icon: Icon(
+                    _isFavorited(mediaItem)
+                        ? Icons.favorite
+                        : Icons.favorite_border,
+                    color: _isFavorited(mediaItem) ? Colors.red : null,
+                  ),
+                  onPressed: () => _toggleFavorite(song),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.share),
+                  onPressed: () => _shareSong(song),
+                ),
+              ],
             ),
             onTap: () {
               setState(() {
@@ -667,8 +806,7 @@ class _SearchScreenState extends State<SearchScreen> {
             },
           );
         }),
-        if (_currentSongUrl != null)
-          const SizedBox(height: 70), // Add padding for miniplayer
+        if (_currentSongUrl != null) const SizedBox(height: 70),
       ],
     );
   }
@@ -731,12 +869,12 @@ class _SearchScreenState extends State<SearchScreen> {
               ),
             const SizedBox(height: 20),
             Text(
-              audioSource.tag.title ?? 'Unknown',
+              mediaItem.title ?? 'Unknown',
               style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
               textAlign: TextAlign.center,
             ),
             Text(
-              audioSource.tag.album ?? 'Unknown',
+              mediaItem.album ?? 'Unknown',
               style: const TextStyle(fontSize: 16, color: Colors.grey),
               textAlign: TextAlign.center,
             ),
@@ -880,7 +1018,7 @@ class _SearchScreenState extends State<SearchScreen> {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  audioSource.tag.title ?? 'Playing...',
+                  mediaItem.title ?? 'Playing...',
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 16),
                 ),
@@ -982,7 +1120,6 @@ class _SearchScreenState extends State<SearchScreen> {
                   setState(() {
                     _currentNavIndex = index;
                     if (index == 0) {
-                      // Search page
                       _selectedAlbum = null;
                       _songs = [];
                       _playlist = null;
@@ -990,7 +1127,6 @@ class _SearchScreenState extends State<SearchScreen> {
                       _currentSongUrl = null;
                       _isFavoritesSelected = false;
                     } else if (index == 1) {
-                      // Favorites page
                       _selectedAlbum = null;
                       _songs = [];
                       _isFavoritesSelected = true;
@@ -1006,7 +1142,6 @@ class _SearchScreenState extends State<SearchScreen> {
                         );
                       }
                     } else if (index == 2) {
-                      // Settings page
                       Navigator.push(
                         context,
                         MaterialPageRoute(
@@ -1014,7 +1149,7 @@ class _SearchScreenState extends State<SearchScreen> {
                         ),
                       ).then((_) {
                         setState(() {
-                          _currentNavIndex = 0; // Return to search page
+                          _currentNavIndex = 0;
                         });
                       });
                     }
@@ -1054,7 +1189,6 @@ class SettingsScreen extends StatelessWidget {
               onPressed: () async {
                 try {
                   final file = await PreferencesManager.exportPreferences();
-                  // Share the file using share_plus
                   await Share.shareXFiles([
                     XFile(file.path),
                   ], text: 'Exported preferences from KHInsider Search');
@@ -1094,7 +1228,6 @@ class SettingsScreen extends StatelessWidget {
                       ),
                     ),
                   );
-                  // Optionally, reload the app state
                   Navigator.pushReplacement(
                     context,
                     MaterialPageRoute(builder: (context) => const SearchApp()),
@@ -1144,6 +1277,7 @@ Future<List<Map<String, dynamic>>> parseSongList(
   String htmlBody,
   String albumName,
   String albumImageUrl,
+  String albumUrl,
 ) async {
   final document = html_parser.parse(htmlBody);
   final rows = document.querySelectorAll('#songlist tr');
@@ -1151,7 +1285,8 @@ Future<List<Map<String, dynamic>>> parseSongList(
   final List<Future<Map<String, dynamic>?>> futures = [];
   final pool = Pool(Platform.numberOfProcessors);
 
-  for (final row in rows) {
+  for (var i = 0; i < rows.length; i++) {
+    final row = rows[i];
     final links = row.querySelectorAll('a');
     if (links.length < 2) continue;
 
@@ -1162,7 +1297,6 @@ Future<List<Map<String, dynamic>>> parseSongList(
 
     final detailUrl = 'https://downloads.khinsider.com$href';
 
-    // Add a future for fetching the MP3 URL
     futures.add(
       pool.withResource(
         () => _fetchActualMp3UrlStatic(detailUrl)
@@ -1180,17 +1314,21 @@ Future<List<Map<String, dynamic>>> parseSongList(
                           : null,
                 ),
               );
-              return {'audioSource': audioSource, 'runtime': runtime};
+              return {
+                'audioSource': audioSource,
+                'runtime': runtime,
+                'albumUrl': albumUrl,
+                'index': i,
+              };
             })
             .catchError((e) {
               debugPrint('Error fetching MP3 URL for $name: $e');
-              return null; // Skip failed songs
+              return null;
             }),
       ),
     );
   }
 
-  // Wait for all MP3 URL fetches to complete
   final results = await Future.wait(futures);
   songs.addAll(results.whereType<Map<String, dynamic>>());
 
