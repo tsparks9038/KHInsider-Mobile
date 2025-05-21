@@ -746,45 +746,52 @@ class _SearchScreenState extends State<SearchScreen> {
       children: [
         const SizedBox(height: 16),
         Center(
-          child:
-              _selectedAlbum!['imageUrl']?.isNotEmpty == true
-                  ? ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: Image.network(
-                      _selectedAlbum!['imageUrl']!,
-                      width: 200,
-                      height: 200,
-                      fit: BoxFit.cover,
-                    ),
-                  )
-                  : Container(
+          child: _selectedAlbum!['imageUrl']?.isNotEmpty == true
+              ? ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.network(
+                    _selectedAlbum!['imageUrl']!,
                     width: 200,
                     height: 200,
-                    color: Colors.grey[300],
-                    child: const Icon(Icons.music_note, size: 100),
+                    fit: BoxFit.cover,
                   ),
+                )
+              : Container(
+                  width: 200,
+                  height: 200,
+                  color: Colors.grey[300],
+                  child: const Icon(Icons.music_note, size: 100),
+                ),
         ),
         const SizedBox(height: 12),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              _selectedAlbum!['albumName'] ?? 'Unknown',
-              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            ),
-            IconButton(
-              icon: const Icon(Icons.share),
-              onPressed: () => _shareAlbum(_selectedAlbum!['albumUrl']!),
-            ),
-          ],
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                _selectedAlbum!['albumName'] ?? 'Unknown',
+                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
+                softWrap: true,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '${_selectedAlbum!['type']?.isEmpty == true ? 'None' : _selectedAlbum!['type']} - ${_selectedAlbum!['year']} | ${_selectedAlbum!['platform']}',
+                style: const TextStyle(color: Colors.grey),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
         ),
-        const SizedBox(height: 4),
-        Text(
-          '${_selectedAlbum!['type']?.isEmpty == true ? 'None' : _selectedAlbum!['type']} - ${_selectedAlbum!['year']} | ${_selectedAlbum!['platform']}',
-          style: const TextStyle(color: Colors.grey),
-          textAlign: TextAlign.center,
+        const SizedBox(height: 8),
+        Center(
+          child: IconButton(
+            icon: const Icon(Icons.share),
+            onPressed: () => _shareAlbum(_selectedAlbum!['albumUrl']!),
+          ),
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 16),
         ..._songs.asMap().entries.map((entry) {
           final index = entry.key;
           final song = entry.value;
