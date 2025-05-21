@@ -61,9 +61,7 @@ class PreferencesManager {
   static Future<File> exportPreferences() async {
     final directory = await getApplicationDocumentsDirectory();
     final backupFile = File('${directory.path}/$_backupFileName');
-    final exportFile = File(
-      '${directory.path}/shared_prefs_export.json',
-    ); // Changed to .json
+    final exportFile = File('${directory.path}/shared_prefs_export.json');
 
     if (await backupFile.exists()) {
       await backupFile.copy(exportFile.path);
@@ -234,8 +232,7 @@ class _SearchScreenState extends State<SearchScreen> {
       _currentSongIndex = 0;
       _currentSongUrl = null;
       _isFavoritesSelected = false;
-      _isPlayerExpanded =
-          songIndex != null; // Only expand player if songIndex is provided
+      _isPlayerExpanded = songIndex != null;
     });
 
     try {
@@ -255,7 +252,6 @@ class _SearchScreenState extends State<SearchScreen> {
           ),
         );
       }
-      // If no songIndex, just show the album details (song list), no snackbar needed
     } catch (e) {
       debugPrint('Error handling deep link: $e');
       ScaffoldMessenger.of(
@@ -429,18 +425,113 @@ class _SearchScreenState extends State<SearchScreen> {
     try {
       final response = await _httpClient.get(Uri.parse(fullUrl));
       if (response.statusCode == 200) {
+        final document = html_parser.parse(response.body);
         final imageUrl = _getHighResImageUrl(
-          html_parser
-                  .parse(response.body)
-                  .querySelector('.albumImage img')
-                  ?.attributes['src'] ??
-              '',
+          document.querySelector('.albumImage img')?.attributes['src'] ?? '',
         );
 
-        final albumName = _selectedAlbum?['albumName'] ?? 'Unknown';
-        final type = _selectedAlbum?['type'] ?? '';
-        final year = _selectedAlbum?['year'] ?? '';
-        final platform = _selectedAlbum?['platform'] ?? '';
+        // Parse album metadata
+        final albumName =
+            document.querySelector('h2')?.text.trim() ?? 'Unknown';
+        String type = _selectedAlbum?['type'] ?? ''; // Preserve existing type
+        String year = _selectedAlbum?['year'] ?? ''; // Preserve existing year
+        String platform =
+            _selectedAlbum?['platform'] ?? ''; // Preserve existing platform
+
+        // Primary parsing: <p align="left">
+        final metadataParagraph = document.querySelector('p[align="left"]');
+        if (metadataParagraph != null) {
+          final rawInnerHtml = metadataParagraph.innerHtml;
+          debugPrint('Raw metadata HTML: "$rawInnerHtml"');
+          final metadataLines =
+              rawInnerHtml
+                  .split(RegExp(r'<br\s*/?>'))
+                  .map((line) => line.trim())
+                  .toList();
+          debugPrint('Split metadata lines: $metadataLines');
+          for (final line in metadataLines) {
+            if (line.isEmpty) continue;
+            // Strip HTML tags using a safer method
+            String text = line.replaceAll(RegExp(r'<[^>]+>'), '').trim();
+            text = text.replaceAll(RegExp(r'\s+'), ' ');
+            debugPrint('Cleaned metadata line: "$text"');
+            if (text.isEmpty) continue;
+            // Simplified RegExp matching
+            if (RegExp(
+              r'^(Platforms?|Platform)\s*:',
+              caseSensitive: false,
+            ).hasMatch(text)) {
+              platform =
+                  text
+                      .replaceFirst(
+                        RegExp(
+                          r'^(Platforms?|Platform)\s*:',
+                          caseSensitive: false,
+                        ),
+                        '',
+                      )
+                      .trim();
+              debugPrint('Extracted platform: "$platform"');
+            } else if (RegExp(
+              r'^Year\s*:',
+              caseSensitive: false,
+            ).hasMatch(text)) {
+              year =
+                  text
+                      .replaceFirst(
+                        RegExp(r'^Year\s*:', caseSensitive: false),
+                        '',
+                      )
+                      .trim();
+              debugPrint('Extracted year: "$year"');
+            } else if (RegExp(
+              r'^(Album type|Type)\s*:',
+              caseSensitive: false,
+            ).hasMatch(text)) {
+              type =
+                  text
+                      .replaceFirst(
+                        RegExp(r'^(Album type|Type)\s*:', caseSensitive: false),
+                        '',
+                      )
+                      .trim();
+              debugPrint('Extracted type: "$type"');
+            }
+          }
+        } else {
+          debugPrint('No metadata paragraph found for $fullUrl');
+        }
+
+        // Fallback parsing: <meta name="description">
+        if (type.isEmpty || year.isEmpty || platform.isEmpty) {
+          final metaDescription =
+              document
+                  .querySelector('meta[name="description"]')
+                  ?.attributes['content'] ??
+              '';
+          debugPrint('Meta description: "$metaDescription"');
+          if (metaDescription.isNotEmpty) {
+            // Example: "Download '88 Games (Arcade) (gamerip) (1988) album..."
+            final regex = RegExp(
+              r'\(([^)]+)\)\s*\((gamerip|soundtrack|singles|arrangements|remixes|compilations|inspired by)\)\s*\((\d{4})\)',
+              caseSensitive: false,
+            );
+            final match = regex.firstMatch(metaDescription);
+            if (match != null) {
+              if (platform.isEmpty)
+                platform = match.group(1)?.trim() ?? platform;
+              if (type.isEmpty) type = match.group(2)?.trim() ?? type;
+              if (year.isEmpty) year = match.group(3)?.trim() ?? year;
+              debugPrint(
+                'Fallback extracted: platform="$platform", type="$type", year="$year"',
+              );
+            }
+          }
+        }
+
+        debugPrint(
+          'Final parsed metadata: type="$type", year="$year", platform="$platform"',
+        );
 
         setState(() {
           _selectedAlbum = {
@@ -625,7 +716,9 @@ class _SearchScreenState extends State<SearchScreen> {
                       ),
                       onTap: () {
                         setState(() {
-                          _selectedAlbum = album;
+                          _selectedAlbum = Map<String, String>.from(
+                            album,
+                          ); // Preserve search metadata
                           _songs = [];
                           _playlist = null;
                           _currentSongIndex = 0;
