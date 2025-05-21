@@ -149,6 +149,7 @@ class _SearchScreenState extends State<SearchScreen> {
   List<String> _albumTypes = ['All'];
   String _selectedType = 'All';
   StreamSubscription? _uriLinkSubscription;
+  bool _isDeepLinkLoading = false;
 
   @override
   void initState() {
@@ -209,43 +210,52 @@ class _SearchScreenState extends State<SearchScreen> {
   Future<void> _handleDeepLink(Uri uri) async {
     if (uri.host != 'downloads.khinsider.com' ||
         !uri.path.startsWith('/game-soundtracks/album')) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Unsupported deep link.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unsupported deep link.')),
+      );
       return;
     }
 
     final albumUrl = uri.path;
     final songIndex = int.tryParse(uri.queryParameters['song'] ?? '');
 
+    // Set loading state
     setState(() {
-      _selectedAlbum = {
-        'albumUrl': albumUrl,
-        'albumName': 'Unknown',
-        'imageUrl': '',
-        'type': '',
-        'year': '',
-        'platform': '',
-      };
+      _isDeepLinkLoading = true;
+      _selectedAlbum = null;
       _songs = [];
       _playlist = null;
       _currentSongIndex = 0;
       _currentSongUrl = null;
       _isFavoritesSelected = false;
-      _isPlayerExpanded = songIndex != null;
     });
 
     try {
+      // Load preferences before fetching album
+      await _loadPreferences();
       await _fetchAlbumPage(albumUrl);
       if (songIndex != null &&
           songIndex >= 0 &&
           _songs.isNotEmpty &&
           songIndex < _songs.length) {
-        await _playAudioSourceAtIndex(songIndex, false);
+        // Set the audio source without playing
+        await _player.setAudioSource(_playlist!, initialIndex: songIndex);
         setState(() {
+          _currentSongIndex = songIndex;
+          _currentSongUrl =
+              (_playlist!.children[songIndex] as ProgressiveAudioSource)
+                  .uri
+                  .toString();
+          _isFavoritesSelected = false;
           _isPlayerExpanded = true;
+          _isDeepLinkLoading = false;
         });
-      } else if (songIndex != null) {
+        // Play audio after expanded player is shown
+        await _player.play();
+      } else {
+        setState(() {
+          _isDeepLinkLoading = false;
+        });
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Invalid song index or album not found.'),
@@ -253,28 +263,34 @@ class _SearchScreenState extends State<SearchScreen> {
         );
       }
     } catch (e) {
+      setState(() {
+        _isDeepLinkLoading = false;
+      });
       debugPrint('Error handling deep link: $e');
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed to load album: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to load album: $e')),
+      );
     }
   }
 
   Future<void> _loadPreferences() async {
+    final shuffleEnabled = PreferencesManager.getBool('shuffleEnabled') ?? false;
+    final loopModeString = PreferencesManager.getString('loopMode') ?? 'off';
+    final loopMode = {
+      'off': LoopMode.off,
+      'one': LoopMode.one,
+      'all': LoopMode.all,
+    }[loopModeString] ?? LoopMode.off;
+
     setState(() {
-      _isShuffleEnabled = PreferencesManager.getBool('shuffleEnabled') ?? false;
-      final loopModeString = PreferencesManager.getString('loopMode') ?? 'off';
-      _loopMode =
-          {
-            'off': LoopMode.off,
-            'one': LoopMode.one,
-            'all': LoopMode.all,
-          }[loopModeString] ??
-          LoopMode.off;
+      _isShuffleEnabled = shuffleEnabled;
+      _loopMode = loopMode;
     });
-    _player.setShuffleModeEnabled(_isShuffleEnabled);
-    _player.setLoopMode(_loopMode);
-    _loadFavorites();
+
+    // Apply preferences to the player
+    await _player.setShuffleModeEnabled(shuffleEnabled);
+    await _player.setLoopMode(loopMode);
+    await _loadFavorites();
   }
 
   Future<void> _loadFavorites() async {
@@ -382,9 +398,9 @@ class _SearchScreenState extends State<SearchScreen> {
       });
     } catch (e) {
       debugPrint('Error playing audio: $e');
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed to play song: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to play song: $e')),
+      );
     }
   }
 
@@ -433,68 +449,52 @@ class _SearchScreenState extends State<SearchScreen> {
         // Parse album metadata
         final albumName =
             document.querySelector('h2')?.text.trim() ?? 'Unknown';
-        String type = _selectedAlbum?['type'] ?? ''; // Preserve existing type
-        String year = _selectedAlbum?['year'] ?? ''; // Preserve existing year
-        String platform =
-            _selectedAlbum?['platform'] ?? ''; // Preserve existing platform
+        String type = _selectedAlbum?['type'] ?? '';
+        String year = _selectedAlbum?['year'] ?? '';
+        String platform = _selectedAlbum?['platform'] ?? '';
 
         // Primary parsing: <p align="left">
         final metadataParagraph = document.querySelector('p[align="left"]');
         if (metadataParagraph != null) {
           final rawInnerHtml = metadataParagraph.innerHtml;
           debugPrint('Raw metadata HTML: "$rawInnerHtml"');
-          final metadataLines =
-              rawInnerHtml
-                  .split(RegExp(r'<br\s*/?>'))
-                  .map((line) => line.trim())
-                  .toList();
+          final metadataLines = rawInnerHtml
+              .split(RegExp(r'<br\s*/?>'))
+              .map((line) => line.trim())
+              .toList();
           debugPrint('Split metadata lines: $metadataLines');
           for (final line in metadataLines) {
             if (line.isEmpty) continue;
-            // Strip HTML tags using a safer method
             String text = line.replaceAll(RegExp(r'<[^>]+>'), '').trim();
             text = text.replaceAll(RegExp(r'\s+'), ' ');
             debugPrint('Cleaned metadata line: "$text"');
             if (text.isEmpty) continue;
-            // Simplified RegExp matching
-            if (RegExp(
-              r'^(Platforms?|Platform)\s*:',
-              caseSensitive: false,
-            ).hasMatch(text)) {
-              platform =
-                  text
-                      .replaceFirst(
-                        RegExp(
-                          r'^(Platforms?|Platform)\s*:',
-                          caseSensitive: false,
-                        ),
-                        '',
-                      )
-                      .trim();
+            if (RegExp(r'^(Platforms?|Platform)\s*:', caseSensitive: false)
+                .hasMatch(text)) {
+              platform = text
+                  .replaceFirst(
+                    RegExp(r'^(Platforms?|Platform)\s*:', caseSensitive: false),
+                    '',
+                  )
+                  .trim();
               debugPrint('Extracted platform: "$platform"');
-            } else if (RegExp(
-              r'^Year\s*:',
-              caseSensitive: false,
-            ).hasMatch(text)) {
-              year =
-                  text
-                      .replaceFirst(
-                        RegExp(r'^Year\s*:', caseSensitive: false),
-                        '',
-                      )
-                      .trim();
+            } else if (RegExp(r'^Year\s*:', caseSensitive: false)
+                .hasMatch(text)) {
+              year = text
+                  .replaceFirst(
+                    RegExp(r'^Year\s*:', caseSensitive: false),
+                    '',
+                  )
+                  .trim();
               debugPrint('Extracted year: "$year"');
-            } else if (RegExp(
-              r'^(Album type|Type)\s*:',
-              caseSensitive: false,
-            ).hasMatch(text)) {
-              type =
-                  text
-                      .replaceFirst(
-                        RegExp(r'^(Album type|Type)\s*:', caseSensitive: false),
-                        '',
-                      )
-                      .trim();
+            } else if (RegExp(r'^(Album type|Type)\s*:', caseSensitive: false)
+                .hasMatch(text)) {
+              type = text
+                  .replaceFirst(
+                    RegExp(r'^(Album type|Type)\s*:', caseSensitive: false),
+                    '',
+                  )
+                  .trim();
               debugPrint('Extracted type: "$type"');
             }
           }
@@ -511,7 +511,6 @@ class _SearchScreenState extends State<SearchScreen> {
               '';
           debugPrint('Meta description: "$metaDescription"');
           if (metaDescription.isNotEmpty) {
-            // Example: "Download '88 Games (Arcade) (gamerip) (1988) album..."
             final regex = RegExp(
               r'\(([^)]+)\)\s*\((gamerip|soundtrack|singles|arrangements|remixes|compilations|inspired by)\)\s*\((\d{4})\)',
               caseSensitive: false,
@@ -563,15 +562,8 @@ class _SearchScreenState extends State<SearchScreen> {
           _songs = songs;
           _playlist = ConcatenatingAudioSource(
             children:
-                songs
-                    .map((song) => song['audioSource'] as AudioSource)
-                    .toList(),
+                songs.map((song) => song['audioSource'] as AudioSource).toList(),
           );
-          _player.setShuffleModeEnabled(_isShuffleEnabled);
-          if (_isShuffleEnabled) {
-            _player.shuffle();
-          }
-          _player.setLoopMode(_loopMode);
           _isFavoritesSelected = false;
         });
       } else {
@@ -580,7 +572,7 @@ class _SearchScreenState extends State<SearchScreen> {
       }
     } catch (e) {
       debugPrint('Error occurred while fetching album page: $e');
-      throw e; // Rethrow to be caught in _handleDeepLink
+      throw e;
     }
   }
 
@@ -746,22 +738,23 @@ class _SearchScreenState extends State<SearchScreen> {
       children: [
         const SizedBox(height: 16),
         Center(
-          child: _selectedAlbum!['imageUrl']?.isNotEmpty == true
-              ? ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.network(
-                    _selectedAlbum!['imageUrl']!,
+          child:
+              _selectedAlbum!['imageUrl']?.isNotEmpty == true
+                  ? ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.network(
+                      _selectedAlbum!['imageUrl']!,
+                      width: 200,
+                      height: 200,
+                      fit: BoxFit.cover,
+                    ),
+                  )
+                  : Container(
                     width: 200,
                     height: 200,
-                    fit: BoxFit.cover,
+                    color: Colors.grey[300],
+                    child: const Icon(Icons.music_note, size: 100),
                   ),
-                )
-              : Container(
-                  width: 200,
-                  height: 200,
-                  color: Colors.grey[300],
-                  child: const Icon(Icons.music_note, size: 100),
-                ),
         ),
         const SizedBox(height: 12),
         Padding(
@@ -771,7 +764,10 @@ class _SearchScreenState extends State<SearchScreen> {
             children: [
               Text(
                 _selectedAlbum!['albumName'] ?? 'Unknown',
-                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
                 textAlign: TextAlign.center,
                 softWrap: true,
               ),
@@ -1165,40 +1161,43 @@ class _SearchScreenState extends State<SearchScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar:
-          _isPlayerExpanded
+          _isPlayerExpanded || _isDeepLinkLoading
               ? null
               : AppBar(title: const Text('KHInsider Search')),
       body: Stack(
         children: [
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
-              children: [
-                if (_currentNavIndex == 0 && _selectedAlbum == null) ...[
-                  TextField(
-                    controller: _searchController,
-                    decoration: const InputDecoration(
-                      labelText: 'Search Albums',
-                      border: OutlineInputBorder(),
+          if (_isDeepLinkLoading)
+            const Center(child: CircularProgressIndicator())
+          else
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  if (_currentNavIndex == 0 && _selectedAlbum == null) ...[
+                    TextField(
+                      controller: _searchController,
+                      decoration: const InputDecoration(
+                        labelText: 'Search Albums',
+                        border: OutlineInputBorder(),
+                      ),
+                      onSubmitted: (value) {
+                        setState(() {});
+                      },
                     ),
-                    onSubmitted: (value) {
-                      setState(() {});
-                    },
+                    const SizedBox(height: 16),
+                  ],
+                  Expanded(
+                    child:
+                        _currentNavIndex == 0
+                            ? (_selectedAlbum == null
+                                ? _buildAlbumList()
+                                : _buildSongList())
+                            : _buildFavoritesList(),
                   ),
-                  const SizedBox(height: 16),
                 ],
-                Expanded(
-                  child:
-                      _currentNavIndex == 0
-                          ? (_selectedAlbum == null
-                              ? _buildAlbumList()
-                              : _buildSongList())
-                          : _buildFavoritesList(),
-                ),
-              ],
+              ),
             ),
-          ),
-          if (_currentSongUrl != null)
+          if (_currentSongUrl != null && !_isDeepLinkLoading)
             Align(
               alignment: Alignment.bottomCenter,
               child: AnimatedSwitcher(
@@ -1212,7 +1211,7 @@ class _SearchScreenState extends State<SearchScreen> {
         ],
       ),
       bottomNavigationBar:
-          _isPlayerExpanded
+          _isPlayerExpanded || _isDeepLinkLoading
               ? null
               : BottomNavigationBar(
                 currentIndex: _currentNavIndex,
