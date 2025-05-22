@@ -290,9 +290,7 @@ class _SearchScreenState extends State<SearchScreen>
     super.initState();
     _songState = ValueNotifier<SongState>(SongState(0, null));
     WidgetsBinding.instance.addObserver(this);
-    _loadPreferences();
-    _restorePlaybackState();
-    _initDeepLinks();
+    _init();
     _player.sequenceStateStream.listen((state) {
       if (state == null || _playlist == null) return;
       final index = state.currentIndex;
@@ -305,6 +303,13 @@ class _SearchScreenState extends State<SearchScreen>
       );
       _savePlaybackState();
     });
+  }
+
+  Future<void> _init() async {
+    await _loadPreferences();
+    await _loadFavorites();
+    await _restorePlaybackState();
+    await _initDeepLinks();
   }
 
   @override
@@ -359,64 +364,82 @@ class _SearchScreenState extends State<SearchScreen>
   Future<void> _restorePlaybackState() async {
     final prefs = await SharedPreferences.getInstance();
     final currentSongUrl = prefs.getString('currentSongUrl');
-    if (currentSongUrl == null) return;
+    if (currentSongUrl == null) {
+      debugPrint('No playback state to restore');
+      return;
+    }
 
     final currentSongIndex = prefs.getInt('currentSongIndex') ?? 0;
     final isFavoritesSelected = prefs.getBool('isFavoritesSelected') ?? false;
     final playbackPosition = prefs.getInt('playbackPosition') ?? 0;
     final songsJson = prefs.getString('playlistSongs');
 
-    if (songsJson == null) return;
-
-    final List<dynamic> songsList = jsonDecode(songsJson);
-    final restoredSongs =
-        songsList.map((item) {
-          final map = item as Map<String, dynamic>;
-          final mediaItem = MediaItem(
-            id: map['id'],
-            title: map['title'],
-            album: map['album'],
-            artist: map['artist'],
-            artUri: map['artUri'] != null ? Uri.parse(map['artUri']) : null,
-          );
-          return {
-            'audioSource': ProgressiveAudioSource(
-              Uri.parse(map['id']),
-              tag: mediaItem,
-            ),
-            'runtime': map['runtime'],
-            'albumUrl': map['albumUrl'],
-            'index': map['index'],
-            'songPageUrl': map['songPageUrl'],
-          };
-        }).toList();
-
-    setState(() {
-      _isFavoritesSelected = isFavoritesSelected;
-      if (isFavoritesSelected) {
-        _favorites = restoredSongs;
-      } else {
-        _songs = restoredSongs;
-      }
-      _playlist = ConcatenatingAudioSource(
-        children:
-            restoredSongs
-                .map((song) => song['audioSource'] as AudioSource)
-                .toList(),
-      );
-    });
-
-    _songState.value = SongState(currentSongIndex, currentSongUrl);
+    if (songsJson == null) {
+      debugPrint('No playlist songs saved');
+      return;
+    }
 
     try {
-      await _player.setAudioSource(_playlist!, initialIndex: currentSongIndex);
-      await _player.seek(Duration(seconds: playbackPosition));
-      await _player.play();
+      final List<dynamic> songsList = jsonDecode(songsJson);
+      final restoredSongs =
+          songsList.map((item) {
+            final map = item as Map<String, dynamic>;
+            if (!map.containsKey('id') || !map.containsKey('title')) {
+              throw FormatException('Invalid song data: $map');
+            }
+            final mediaItem = MediaItem(
+              id: map['id'],
+              title: map['title'],
+              album: map['album'],
+              artist: map['artist'],
+              artUri: map['artUri'] != null ? Uri.parse(map['artUri']) : null,
+            );
+            return {
+              'audioSource': ProgressiveAudioSource(
+                Uri.parse(map['id']),
+                tag: mediaItem,
+              ),
+              'runtime': map['runtime'] ?? 'Unknown',
+              'albumUrl': map['albumUrl'] ?? '',
+              'index': map['index'] ?? 0,
+              'songPageUrl': map['songPageUrl'] ?? '',
+            };
+          }).toList();
+
+      setState(() {
+        _isFavoritesSelected = isFavoritesSelected;
+        _playlist = ConcatenatingAudioSource(
+          children:
+              restoredSongs
+                  .map((song) => song['audioSource'] as AudioSource)
+                  .toList(),
+        );
+        _selectedAlbum = null;
+      });
+
+      debugPrint(
+        'Restored playback: index=$currentSongIndex, url=$currentSongUrl, isFavorites=$isFavoritesSelected, songCount=${restoredSongs.length}',
+      );
+
+      _songState.value = SongState(currentSongIndex, currentSongUrl);
+
+      try {
+        await _player.setAudioSource(
+          _playlist!,
+          initialIndex: currentSongIndex,
+        );
+        await _player.seek(Duration(seconds: playbackPosition));
+      } catch (e) {
+        debugPrint('Error setting audio source: $e');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to restore playback queue: $e')),
+        );
+      }
     } catch (e) {
-      debugPrint('Error restoring playback: $e');
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed to restore playback: $e')));
+      debugPrint('Error restoring playback state: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to restore playback queue: $e')),
+      );
     }
   }
 
@@ -560,10 +583,9 @@ class _SearchScreenState extends State<SearchScreen>
                       .map((song) => song['audioSource'] as AudioSource)
                       .toList(),
             );
-            _isPlayerExpanded = true; // Open expanded player for song playback
+            _isPlayerExpanded = true;
           });
 
-          // Play the specific song
           await _playAudioSourceAtIndex(songIndex, false);
         } catch (e) {
           debugPrint('Error fetching album page: $e');
@@ -601,7 +623,7 @@ class _SearchScreenState extends State<SearchScreen>
             };
             _songs = [song];
             _playlist = ConcatenatingAudioSource(children: [audioSource]);
-            _isPlayerExpanded = true; // Open expanded player for fallback
+            _isPlayerExpanded = true;
           });
 
           await _playAudioSourceAtIndex(0, false);
@@ -615,9 +637,8 @@ class _SearchScreenState extends State<SearchScreen>
           throw Exception('Album not found or no songs available');
         }
 
-        // Display song list without setting playlist or playing a song
         setState(() {
-          _isPlayerExpanded = false; // Ensure player is not expanded
+          _isPlayerExpanded = false;
         });
       }
 
@@ -654,36 +675,41 @@ class _SearchScreenState extends State<SearchScreen>
 
     await _player.setShuffleModeEnabled(shuffleEnabled);
     await _player.setLoopMode(loopMode);
-    await _loadFavorites();
   }
 
   Future<void> _loadFavorites() async {
     final favoritesJson = PreferencesManager.getString('favorites');
     if (favoritesJson != null) {
-      final List<dynamic> favoritesList = jsonDecode(favoritesJson);
-      setState(() {
-        _favorites =
-            favoritesList.map((item) {
-              final map = item as Map<String, dynamic>;
-              final mediaItem = MediaItem(
-                id: map['id'],
-                title: map['title'],
-                album: map['album'],
-                artist: map['artist'],
-                artUri: map['artUri'] != null ? Uri.parse(map['artUri']) : null,
-              );
-              return {
-                'audioSource': ProgressiveAudioSource(
-                  Uri.parse(map['id']),
-                  tag: mediaItem,
-                ),
-                'runtime': map['runtime'],
-                'albumUrl': map['albumUrl'],
-                'index': map['index'],
-                'songPageUrl': map['songPageUrl'],
-              };
-            }).toList();
-      });
+      try {
+        final List<dynamic> favoritesList = jsonDecode(favoritesJson);
+        setState(() {
+          _favorites =
+              favoritesList.map((item) {
+                final map = item as Map<String, dynamic>;
+                final mediaItem = MediaItem(
+                  id: map['id'],
+                  title: map['title'],
+                  album: map['album'],
+                  artist: map['artist'],
+                  artUri:
+                      map['artUri'] != null ? Uri.parse(map['artUri']) : null,
+                );
+                return {
+                  'audioSource': ProgressiveAudioSource(
+                    Uri.parse(map['id']),
+                    tag: mediaItem,
+                  ),
+                  'runtime': map['runtime'] ?? 'Unknown',
+                  'albumUrl': map['albumUrl'] ?? '',
+                  'index': map['index'] ?? 0,
+                  'songPageUrl': map['songPageUrl'] ?? '',
+                };
+              }).toList();
+        });
+        debugPrint('Loaded ${_favorites.length} favorite songs');
+      } catch (e) {
+        debugPrint('Error loading favorites: $e');
+      }
     }
   }
 
@@ -1092,6 +1118,7 @@ class _SearchScreenState extends State<SearchScreen>
                       onTap: () {
                         setState(() {
                           _selectedAlbum = Map<String, String>.from(album);
+                          _isFavoritesSelected = false;
                         });
                         _fetchAlbumPage(album['albumUrl']!);
                       },
@@ -1170,7 +1197,10 @@ class _SearchScreenState extends State<SearchScreen>
           final audioSource = song['audioSource'] as ProgressiveAudioSource;
           final mediaItem = audioSource.tag as MediaItem;
           return ListTile(
-            title: Text(audioSource.tag.title ?? 'Unknown'),
+            title: Text(
+              audioSource.tag.title ?? 'Unknown',
+              overflow: TextOverflow.ellipsis,
+            ),
             subtitle: Text(song['runtime'] ?? 'Unknown'),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
@@ -1242,7 +1272,10 @@ class _SearchScreenState extends State<SearchScreen>
                       radius: 30,
                       child: Icon(Icons.music_note, color: Colors.white),
                     ),
-            title: Text(mediaItem.title ?? 'Unknown'),
+            title: Text(
+              mediaItem.title ?? 'Unknown',
+              overflow: TextOverflow.ellipsis,
+            ),
             subtitle: Text(song['runtime'] ?? 'Unknown'),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
@@ -1562,6 +1595,7 @@ class _SearchScreenState extends State<SearchScreen>
     if (_selectedAlbum != null && _currentNavIndex == 0) {
       setState(() {
         _selectedAlbum = null;
+        _isFavoritesSelected = false;
       });
       return false;
     }
@@ -1569,6 +1603,7 @@ class _SearchScreenState extends State<SearchScreen>
       setState(() {
         _currentNavIndex = 0;
         _selectedAlbum = null;
+        _isFavoritesSelected = false;
       });
       return false;
     }
@@ -1597,6 +1632,7 @@ class _SearchScreenState extends State<SearchScreen>
                             onPressed: () {
                               setState(() {
                                 _selectedAlbum = null;
+                                _isFavoritesSelected = false;
                               });
                             },
                           )
@@ -1663,28 +1699,26 @@ class _SearchScreenState extends State<SearchScreen>
                   onTap: (index) {
                     setState(() {
                       _currentNavIndex = index;
-                      if (index == 0) {
-                        _isFavoritesSelected = false;
-                      } else if (index == 1) {
-                        _selectedAlbum = null;
-                        _isFavoritesSelected = true;
-                      } else if (index == 2) {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder:
-                                (context) => SettingsScreen(
-                                  onThemeChanged: widget.onThemeChanged,
-                                ),
-                          ),
-                        ).then((_) {
-                          setState(() {
-                            _currentNavIndex = 0;
-                            _isFavoritesSelected = false;
-                          });
-                        });
-                      }
+                      _selectedAlbum = null;
+                      _isFavoritesSelected = index == 1;
                     });
+                    if (index == 2) {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder:
+                              (context) => SettingsScreen(
+                                onThemeChanged: widget.onThemeChanged,
+                              ),
+                        ),
+                      ).then((_) {
+                        setState(() {
+                          _currentNavIndex = 0;
+                          _selectedAlbum = null;
+                          _isFavoritesSelected = false;
+                        });
+                      });
+                    }
                   },
                   items: const [
                     BottomNavigationBarItem(
