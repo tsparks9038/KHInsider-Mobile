@@ -170,8 +170,9 @@ class _SearchAppState extends State<SearchApp> {
             titleLarge: TextStyle(color: Colors.white),
           ),
           iconTheme: const IconThemeData(color: Colors.white),
-          progressIndicatorTheme:
-              const ProgressIndicatorThemeData(color: Colors.blueAccent),
+          progressIndicatorTheme: const ProgressIndicatorThemeData(
+            color: Colors.blueAccent,
+          ),
         );
       case 'amoled':
         return ThemeData(
@@ -198,8 +199,9 @@ class _SearchAppState extends State<SearchApp> {
             titleLarge: TextStyle(color: Colors.white),
           ),
           iconTheme: const IconThemeData(color: Colors.white),
-          progressIndicatorTheme:
-              const ProgressIndicatorThemeData(color: Colors.blueAccent),
+          progressIndicatorTheme: const ProgressIndicatorThemeData(
+            color: Colors.blueAccent,
+          ),
           cardColor: Colors.grey[900],
           dividerColor: Colors.grey[800],
         );
@@ -229,8 +231,9 @@ class _SearchAppState extends State<SearchApp> {
             titleLarge: TextStyle(color: Colors.black),
           ),
           iconTheme: const IconThemeData(color: Colors.black),
-          progressIndicatorTheme:
-              const ProgressIndicatorThemeData(color: Colors.blue),
+          progressIndicatorTheme: const ProgressIndicatorThemeData(
+            color: Colors.blue,
+          ),
         );
     }
   }
@@ -324,9 +327,9 @@ class _SearchScreenState extends State<SearchScreen> {
       },
       onError: (e) {
         debugPrint('Error in URI stream: $e');
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to process link: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Failed to process link: $e')));
       },
     );
   }
@@ -334,16 +337,15 @@ class _SearchScreenState extends State<SearchScreen> {
   Future<void> _handleDeepLink(Uri uri) async {
     if (uri.host != 'downloads.khinsider.com' ||
         !uri.path.startsWith('/game-soundtracks/album')) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Unsupported deep link.')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Unsupported deep link.')));
       return;
     }
 
     final albumUrl = uri.path;
     final songIndex = int.tryParse(uri.queryParameters['song'] ?? '');
 
-    // Set loading state
     setState(() {
       _isDeepLinkLoading = true;
       _selectedAlbum = null;
@@ -365,8 +367,7 @@ class _SearchScreenState extends State<SearchScreen> {
         setState(() {
           _currentSongIndex = songIndex;
           _currentSongUrl =
-              (_playlist!.children[songIndex] as ProgressiveAudioSource)
-                  .uri
+              (_playlist!.children[songIndex] as ProgressiveAudioSource).uri
                   .toString();
           _isFavoritesSelected = false;
           _isPlayerExpanded = true;
@@ -388,20 +389,23 @@ class _SearchScreenState extends State<SearchScreen> {
         _isDeepLinkLoading = false;
       });
       debugPrint('Error handling deep link: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to load album: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to load album: $e')));
     }
   }
 
   Future<void> _loadPreferences() async {
-    final shuffleEnabled = PreferencesManager.getBool('shuffleEnabled') ?? false;
+    final shuffleEnabled =
+        PreferencesManager.getBool('shuffleEnabled') ?? false;
     final loopModeString = PreferencesManager.getString('loopMode') ?? 'off';
-    final loopMode = {
-      'off': LoopMode.off,
-      'one': LoopMode.one,
-      'all': LoopMode.all,
-    }[loopModeString] ?? LoopMode.off;
+    final loopMode =
+        {
+          'off': LoopMode.off,
+          'one': LoopMode.one,
+          'all': LoopMode.all,
+        }[loopModeString] ??
+        LoopMode.off;
 
     setState(() {
       _isShuffleEnabled = shuffleEnabled;
@@ -418,25 +422,26 @@ class _SearchScreenState extends State<SearchScreen> {
     if (favoritesJson != null) {
       final List<dynamic> favoritesList = jsonDecode(favoritesJson);
       setState(() {
-        _favorites = favoritesList.map((item) {
-          final map = item as Map<String, dynamic>;
-          final mediaItem = MediaItem(
-            id: map['id'],
-            title: map['title'],
-            album: map['album'],
-            artist: map['artist'],
-            artUri: map['artUri'] != null ? Uri.parse(map['artUri']) : null,
-          );
-          return {
-            'audioSource': ProgressiveAudioSource(
-              Uri.parse(map['id']),
-              tag: mediaItem,
-            ),
-            'runtime': map['runtime'],
-            'albumUrl': map['albumUrl'],
-            'index': map['index'],
-          };
-        }).toList();
+        _favorites =
+            favoritesList.map((item) {
+              final map = item as Map<String, dynamic>;
+              final mediaItem = MediaItem(
+                id: map['id'],
+                title: map['title'],
+                album: map['album'],
+                artist: map['artist'],
+                artUri: map['artUri'] != null ? Uri.parse(map['artUri']) : null,
+              );
+              return {
+                'audioSource': ProgressiveAudioSource(
+                  Uri.parse(map['id']),
+                  tag: mediaItem,
+                ),
+                'runtime': map['runtime'],
+                'albumUrl': map['albumUrl'],
+                'index': map['index'],
+              };
+            }).toList();
       });
     }
   }
@@ -507,19 +512,20 @@ class _SearchScreenState extends State<SearchScreen> {
         return;
       }
       await _player.setAudioSource(_playlist!, initialIndex: index);
-      _player.play();
+      await _player.play();
       setState(() {
         _currentSongIndex = index;
         _currentSongUrl =
             (_playlist!.children[index] as ProgressiveAudioSource).uri
                 .toString();
         _isFavoritesSelected = isFavorites;
+        _isPlayerExpanded = true;
       });
     } catch (e) {
       debugPrint('Error playing audio: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to play song: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to play song: $e')));
     }
   }
 
@@ -575,10 +581,11 @@ class _SearchScreenState extends State<SearchScreen> {
         if (metadataParagraph != null) {
           final rawInnerHtml = metadataParagraph.innerHtml;
           debugPrint('Raw metadata HTML: "$rawInnerHtml"');
-          final metadataLines = rawInnerHtml
-              .split(RegExp(r'<br\s*/?>'))
-              .map((line) => line.trim())
-              .toList();
+          final metadataLines =
+              rawInnerHtml
+                  .split(RegExp(r'<br\s*/?>'))
+                  .map((line) => line.trim())
+                  .toList();
           debugPrint('Split metadata lines: $metadataLines');
           for (final line in metadataLines) {
             if (line.isEmpty) continue;
@@ -586,32 +593,44 @@ class _SearchScreenState extends State<SearchScreen> {
             text = text.replaceAll(RegExp(r'\s+'), ' ');
             debugPrint('Cleaned metadata line: "$text"');
             if (text.isEmpty) continue;
-            if (RegExp(r'^(Platforms?|Platform)\s*:', caseSensitive: false)
-                .hasMatch(text)) {
-              platform = text
-                  .replaceFirst(
-                    RegExp(r'^(Platforms?|Platform)\s*:', caseSensitive: false),
-                    '',
-                  )
-                  .trim();
+            if (RegExp(
+              r'^(Platforms?|Platform)\s*:',
+              caseSensitive: false,
+            ).hasMatch(text)) {
+              platform =
+                  text
+                      .replaceFirst(
+                        RegExp(
+                          r'^(Platforms?|Platform)\s*:',
+                          caseSensitive: false,
+                        ),
+                        '',
+                      )
+                      .trim();
               debugPrint('Extracted platform: "$platform"');
-            } else if (RegExp(r'^Year\s*:', caseSensitive: false)
-                .hasMatch(text)) {
-              year = text
-                  .replaceFirst(
-                    RegExp(r'^Year\s*:', caseSensitive: false),
-                    '',
-                  )
-                  .trim();
+            } else if (RegExp(
+              r'^Year\s*:',
+              caseSensitive: false,
+            ).hasMatch(text)) {
+              year =
+                  text
+                      .replaceFirst(
+                        RegExp(r'^Year\s*:', caseSensitive: false),
+                        '',
+                      )
+                      .trim();
               debugPrint('Extracted year: "$year"');
-            } else if (RegExp(r'^(Album type|Type)\s*:', caseSensitive: false)
-                .hasMatch(text)) {
-              type = text
-                  .replaceFirst(
-                    RegExp(r'^(Album type|Type)\s*:', caseSensitive: false),
-                    '',
-                  )
-                  .trim();
+            } else if (RegExp(
+              r'^(Album type|Type)\s*:',
+              caseSensitive: false,
+            ).hasMatch(text)) {
+              type =
+                  text
+                      .replaceFirst(
+                        RegExp(r'^(Album type|Type)\s*:', caseSensitive: false),
+                        '',
+                      )
+                      .trim();
               debugPrint('Extracted type: "$type"');
             }
           }
@@ -678,7 +697,9 @@ class _SearchScreenState extends State<SearchScreen> {
           _songs = songs;
           _playlist = ConcatenatingAudioSource(
             children:
-                songs.map((song) => song['audioSource'] as AudioSource).toList(),
+                songs
+                    .map((song) => song['audioSource'] as AudioSource)
+                    .toList(),
           );
           _isFavoritesSelected = false;
         });
@@ -750,20 +771,28 @@ class _SearchScreenState extends State<SearchScreen> {
           return const Center(child: Text('No albums found.'));
         } else {
           _albums = snapshot.data!;
-          final types = _albums
-              .map((album) => album['type']!.isEmpty ? 'None' : album['type']!)
-              .toSet()
-              .toList()
-            ..sort();
+          final types =
+              _albums
+                  .map(
+                    (album) => album['type']!.isEmpty ? 'None' : album['type']!,
+                  )
+                  .toSet()
+                  .toList()
+                ..sort();
           _albumTypes = ['All', ...types];
 
-          final filteredAlbums = _selectedType == 'All'
-              ? _albums
-              : _albums
-                  .where((album) =>
-                      (album['type']!.isEmpty ? 'None' : album['type']!) ==
-                      _selectedType)
-                  .toList();
+          final filteredAlbums =
+              _selectedType == 'All'
+                  ? _albums
+                  : _albums
+                      .where(
+                        (album) =>
+                            (album['type']!.isEmpty
+                                ? 'None'
+                                : album['type']!) ==
+                            _selectedType,
+                      )
+                      .toList();
 
           return Column(
             children: [
@@ -773,12 +802,13 @@ class _SearchScreenState extends State<SearchScreen> {
                   value: _selectedType,
                   isExpanded: true,
                   hint: const Text('Filter by Type'),
-                  items: _albumTypes.map((type) {
-                    return DropdownMenuItem<String>(
-                      value: type,
-                      child: Text(type),
-                    );
-                  }).toList(),
+                  items:
+                      _albumTypes.map((type) {
+                        return DropdownMenuItem<String>(
+                          value: type,
+                          child: Text(type),
+                        );
+                      }).toList(),
                   onChanged: (value) {
                     setState(() {
                       _selectedType = value ?? 'All';
@@ -793,19 +823,22 @@ class _SearchScreenState extends State<SearchScreen> {
                   itemBuilder: (context, index) {
                     final album = filteredAlbums[index];
                     return ListTile(
-                      leading: album['imageUrl']!.isNotEmpty
-                          ? CircleAvatar(
-                              backgroundImage: NetworkImage(album['imageUrl']!),
-                              radius: 30,
-                            )
-                          : const CircleAvatar(
-                              backgroundColor: Colors.grey,
-                              radius: 30,
-                              child: Icon(
-                                Icons.music_note,
-                                color: Colors.white,
+                      leading:
+                          album['imageUrl']!.isNotEmpty
+                              ? CircleAvatar(
+                                backgroundImage: NetworkImage(
+                                  album['imageUrl']!,
+                                ),
+                                radius: 30,
+                              )
+                              : const CircleAvatar(
+                                backgroundColor: Colors.grey,
+                                radius: 30,
+                                child: Icon(
+                                  Icons.music_note,
+                                  color: Colors.white,
+                                ),
                               ),
-                            ),
                       title: Text(album['albumName']!),
                       subtitle: Text(
                         '${album['type']!.isEmpty ? 'None' : album['type']} - ${album['year']} | ${album['platform']}',
@@ -840,22 +873,23 @@ class _SearchScreenState extends State<SearchScreen> {
       children: [
         const SizedBox(height: 16),
         Center(
-          child: _selectedAlbum!['imageUrl']?.isNotEmpty == true
-              ? ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.network(
-                    _selectedAlbum!['imageUrl']!,
+          child:
+              _selectedAlbum!['imageUrl']?.isNotEmpty == true
+                  ? ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.network(
+                      _selectedAlbum!['imageUrl']!,
+                      width: 200,
+                      height: 200,
+                      fit: BoxFit.cover,
+                    ),
+                  )
+                  : Container(
                     width: 200,
                     height: 200,
-                    fit: BoxFit.cover,
+                    color: Colors.grey[300],
+                    child: const Icon(Icons.music_note, size: 100),
                   ),
-                )
-              : Container(
-                  width: 200,
-                  height: 200,
-                  color: Colors.grey[300],
-                  child: const Icon(Icons.music_note, size: 100),
-                ),
         ),
         const SizedBox(height: 12),
         Padding(
@@ -916,9 +950,6 @@ class _SearchScreenState extends State<SearchScreen> {
               ],
             ),
             onTap: () {
-              setState(() {
-                _isPlayerExpanded = false;
-              });
               _playAudioSourceAtIndex(index, false);
             },
           );
@@ -962,16 +993,19 @@ class _SearchScreenState extends State<SearchScreen> {
           final audioSource = song['audioSource'] as ProgressiveAudioSource;
           final mediaItem = audioSource.tag as MediaItem;
           return ListTile(
-            leading: mediaItem.artUri != null
-                ? CircleAvatar(
-                    backgroundImage: NetworkImage(mediaItem.artUri.toString()),
-                    radius: 30,
-                  )
-                : const CircleAvatar(
-                    backgroundColor: Colors.grey,
-                    radius: 30,
-                    child: Icon(Icons.music_note, color: Colors.white),
-                  ),
+            leading:
+                mediaItem.artUri != null
+                    ? CircleAvatar(
+                      backgroundImage: NetworkImage(
+                        mediaItem.artUri.toString(),
+                      ),
+                      radius: 30,
+                    )
+                    : const CircleAvatar(
+                      backgroundColor: Colors.grey,
+                      radius: 30,
+                      child: Icon(Icons.music_note, color: Colors.white),
+                    ),
             title: Text(mediaItem.title ?? 'Unknown'),
             subtitle: Text(song['runtime'] ?? 'Unknown'),
             trailing: Row(
@@ -993,9 +1027,6 @@ class _SearchScreenState extends State<SearchScreen> {
               ],
             ),
             onTap: () {
-              setState(() {
-                _isPlayerExpanded = false;
-              });
               _playAudioSourceAtIndex(index, true);
             },
           );
@@ -1156,7 +1187,8 @@ class _SearchScreenState extends State<SearchScreen> {
                   iconSize: 40.0,
                   icon: Icon(
                     _loopMode == LoopMode.one ? Icons.repeat_one : Icons.repeat,
-                    color: _loopMode != LoopMode.off ? Colors.blue : Colors.grey,
+                    color:
+                        _loopMode != LoopMode.off ? Colors.blue : Colors.grey,
                   ),
                   onPressed: _toggleLoopMode,
                 ),
@@ -1254,112 +1286,181 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
+  Future<bool> _onPop() async {
+    if (_isDeepLinkLoading) {
+      return false; // Prevent back button during deep link loading
+    }
+    if (_isPlayerExpanded) {
+      setState(() {
+        _isPlayerExpanded = false;
+        SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      });
+      return false; // Prevent default back navigation
+    }
+    if (_selectedAlbum != null && _currentNavIndex == 0) {
+      setState(() {
+        _selectedAlbum = null;
+        _songs = [];
+        _playlist = null;
+        _currentSongIndex = 0;
+        _currentSongUrl = null;
+        _isFavoritesSelected = false;
+      });
+      return false; // Prevent default back navigation
+    }
+    if (_currentNavIndex != 0) {
+      setState(() {
+        _currentNavIndex = 0;
+        _selectedAlbum = null;
+        _songs = [];
+        _playlist = null;
+        _currentSongIndex = 0;
+        _currentSongUrl = null;
+        _isFavoritesSelected = false;
+      });
+      return false; // Prevent default back navigation
+    }
+    // Instead of allowing app to close, stay on search screen
+    return false; // Prevent app from closing
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: _isPlayerExpanded || _isDeepLinkLoading
-          ? null
-          : AppBar(title: const Text('KHInsider Search')),
-      body: Stack(
-        children: [
-          if (_isDeepLinkLoading)
-            const Center(child: CircularProgressIndicator())
-          else
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                children: [
-                  if (_currentNavIndex == 0 && _selectedAlbum == null) ...[
-                    TextField(
-                      controller: _searchController,
-                      decoration: const InputDecoration(
-                        labelText: 'Search Albums',
-                        border: OutlineInputBorder(),
-                      ),
-                      onSubmitted: (value) {
-                        setState(() {});
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                  ],
-                  Expanded(
-                    child: _currentNavIndex == 0
-                        ? (_selectedAlbum == null
-                            ? _buildAlbumList()
-                            : _buildSongList())
-                        : _buildFavoritesList(),
-                  ),
-                ],
-              ),
-            ),
-          if (_currentSongUrl != null && !_isDeepLinkLoading)
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 300),
-                child: _isPlayerExpanded
-                    ? _buildExpandedPlayer()
-                    : _buildMiniPlayer(),
-              ),
-            ),
-        ],
-      ),
-      bottomNavigationBar: _isPlayerExpanded || _isDeepLinkLoading
-          ? null
-          : BottomNavigationBar(
-              currentIndex: _currentNavIndex,
-              onTap: (index) {
-                setState(() {
-                  _currentNavIndex = index;
-                  if (index == 0) {
-                    _selectedAlbum = null;
-                    _songs = [];
-                    _playlist = null;
-                    _currentSongIndex = 0;
-                    _currentSongUrl = null;
-                    _isFavoritesSelected = false;
-                  } else if (index == 1) {
-                    _selectedAlbum = null;
-                    _songs = [];
-                    _isFavoritesSelected = true;
-                    if (_favorites.isNotEmpty) {
-                      _playlist = ConcatenatingAudioSource(
-                        children: _favorites
-                            .map((song) => song['audioSource'] as AudioSource)
-                            .toList(),
-                      );
-                    }
-                  } else if (index == 2) {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => SettingsScreen(
-                          onThemeChanged: widget.onThemeChanged,
+    return PopScope(
+      canPop: false, // Prevent default pop behavior
+      onPopInvokedWithResult: (didPop, result) async {
+        if (!didPop) {
+          await _onPop();
+        }
+      },
+      child: Scaffold(
+        appBar:
+            _isPlayerExpanded || _isDeepLinkLoading
+                ? null
+                : AppBar(
+                  title: const Text('KHInsider Search'),
+                  leading:
+                      _selectedAlbum != null && _currentNavIndex == 0
+                          ? IconButton(
+                            icon: const Icon(Icons.arrow_back),
+                            onPressed: () {
+                              setState(() {
+                                _selectedAlbum = null;
+                                _songs = [];
+                                _playlist = null;
+                                _currentSongIndex = 0;
+                                _currentSongUrl = null;
+                                _isFavoritesSelected = false;
+                              });
+                            },
+                          )
+                          : null,
+                ),
+        body: Stack(
+          children: [
+            if (_isDeepLinkLoading)
+              const Center(child: CircularProgressIndicator())
+            else
+              Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  children: [
+                    if (_currentNavIndex == 0 && _selectedAlbum == null) ...[
+                      TextField(
+                        controller: _searchController,
+                        decoration: const InputDecoration(
+                          labelText: 'Search Albums',
+                          border: OutlineInputBorder(),
                         ),
+                        onSubmitted: (value) {
+                          setState(() {});
+                        },
                       ),
-                    ).then((_) {
-                      setState(() {
-                        _currentNavIndex = 0;
-                      });
+                      const SizedBox(height: 16),
+                    ],
+                    Expanded(
+                      child:
+                          _currentNavIndex == 0
+                              ? (_selectedAlbum == null
+                                  ? _buildAlbumList()
+                                  : _buildSongList())
+                              : _buildFavoritesList(),
+                    ),
+                  ],
+                ),
+              ),
+            if (_currentSongUrl != null && !_isDeepLinkLoading)
+              Align(
+                alignment: Alignment.bottomCenter,
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 300),
+                  child:
+                      _isPlayerExpanded
+                          ? _buildExpandedPlayer()
+                          : _buildMiniPlayer(),
+                ),
+              ),
+          ],
+        ),
+        bottomNavigationBar:
+            _isPlayerExpanded || _isDeepLinkLoading
+                ? null
+                : BottomNavigationBar(
+                  currentIndex: _currentNavIndex,
+                  onTap: (index) {
+                    setState(() {
+                      _currentNavIndex = index;
+                      if (index == 0) {
+                        _isFavoritesSelected = false;
+                      } else if (index == 1) {
+                        _selectedAlbum = null;
+                        _songs = [];
+                        _isFavoritesSelected = true;
+                        if (_favorites.isNotEmpty) {
+                          _playlist = ConcatenatingAudioSource(
+                            children:
+                                _favorites
+                                    .map(
+                                      (song) =>
+                                          song['audioSource'] as AudioSource,
+                                    )
+                                    .toList(),
+                          );
+                        }
+                      } else if (index == 2) {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder:
+                                (context) => SettingsScreen(
+                                  onThemeChanged: widget.onThemeChanged,
+                                ),
+                          ),
+                        ).then((_) {
+                          setState(() {
+                            _currentNavIndex = 0;
+                            _isFavoritesSelected = false;
+                          });
+                        });
+                      }
                     });
-                  }
-                });
-              },
-              items: const [
-                BottomNavigationBarItem(
-                  icon: Icon(Icons.search),
-                  label: 'Search',
+                  },
+                  items: const [
+                    BottomNavigationBarItem(
+                      icon: Icon(Icons.search),
+                      label: 'Search',
+                    ),
+                    BottomNavigationBarItem(
+                      icon: Icon(Icons.favorite),
+                      label: 'Favorites',
+                    ),
+                    BottomNavigationBarItem(
+                      icon: Icon(Icons.settings),
+                      label: 'Settings',
+                    ),
+                  ],
                 ),
-                BottomNavigationBarItem(
-                  icon: Icon(Icons.favorite),
-                  label: 'Favorites',
-                ),
-                BottomNavigationBarItem(
-                  icon: Icon(Icons.settings),
-                  label: 'Settings',
-                ),
-              ],
-            ),
+      ),
     );
   }
 }
@@ -1397,10 +1498,9 @@ class SettingsScreen extends StatelessWidget {
               onPressed: () async {
                 try {
                   final file = await PreferencesManager.exportPreferences();
-                  await Share.shareXFiles(
-                    [XFile(file.path)],
-                    text: 'Exported preferences from KHInsider Search',
-                  );
+                  await Share.shareXFiles([
+                    XFile(file.path),
+                  ], text: 'Exported preferences from KHInsider Search');
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
                       content: Text(
@@ -1425,8 +1525,9 @@ class SettingsScreen extends StatelessWidget {
                 );
                 if (result != null && result.files.single.path != null) {
                   final file = File(result.files.single.path!);
-                  final success =
-                      await PreferencesManager.importPreferences(file);
+                  final success = await PreferencesManager.importPreferences(
+                    file,
+                  );
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
                       content: Text(
@@ -1507,27 +1608,32 @@ Future<List<Map<String, dynamic>>> parseSongList(
 
     futures.add(
       pool.withResource(
-        () => _fetchActualMp3UrlStatic(detailUrl).then((mp3Url) {
-          final audioSource = ProgressiveAudioSource(
-            Uri.parse(mp3Url),
-            tag: MediaItem(
-              id: mp3Url,
-              title: name,
-              album: albumName,
-              artist: albumName,
-              artUri: albumImageUrl.isNotEmpty ? Uri.parse(albumImageUrl) : null,
-            ),
-          );
-          return {
-            'audioSource': audioSource,
-            'runtime': runtime,
-            'albumUrl': albumUrl,
-            'index': i,
-          };
-        }).catchError((e) {
-          debugPrint('Error fetching MP3 URL for $name: $e');
-          return null;
-        }),
+        () => _fetchActualMp3UrlStatic(detailUrl)
+            .then((mp3Url) {
+              final audioSource = ProgressiveAudioSource(
+                Uri.parse(mp3Url),
+                tag: MediaItem(
+                  id: mp3Url,
+                  title: name,
+                  album: albumName,
+                  artist: albumName,
+                  artUri:
+                      albumImageUrl.isNotEmpty
+                          ? Uri.parse(albumImageUrl)
+                          : null,
+                ),
+              );
+              return {
+                'audioSource': audioSource,
+                'runtime': runtime,
+                'albumUrl': albumUrl,
+                'index': i,
+              };
+            })
+            .catchError((e) {
+              debugPrint('Error fetching MP3 URL for $name: $e');
+              return null;
+            }),
       ),
     );
   }
@@ -1544,10 +1650,12 @@ Future<String> _fetchActualMp3UrlStatic(String detailPageUrl) async {
     final response = await client.get(Uri.parse(detailPageUrl));
     if (response.statusCode == 200) {
       final document = html_parser.parse(response.body);
-      final mp3Anchor = document.querySelectorAll('a').firstWhere(
-        (a) => a.attributes['href']?.endsWith('.mp3') ?? false,
-        orElse: () => throw Exception('MP3 link not found'),
-      );
+      final mp3Anchor = document
+          .querySelectorAll('a')
+          .firstWhere(
+            (a) => a.attributes['href']?.endsWith('.mp3') ?? false,
+            orElse: () => throw Exception('MP3 link not found'),
+          );
       return mp3Anchor.attributes['href']!;
     }
     throw Exception('Failed to load MP3 URL');
