@@ -14,6 +14,134 @@ import 'package:path_provider/path_provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:app_links/app_links.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:cookie_jar/cookie_jar.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+
+class WebViewScreen extends StatefulWidget {
+  final String url;
+  final VoidCallback onLoginSuccess;
+
+  const WebViewScreen({
+    super.key,
+    required this.url,
+    required this.onLoginSuccess,
+  });
+
+  @override
+  State<WebViewScreen> createState() => _WebViewScreenState();
+}
+
+class _WebViewScreenState extends State<WebViewScreen> {
+  late final WebViewController _controller;
+  final WebViewCookieManager _cookieManager = WebViewCookieManager();
+  bool _loginAttempted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller =
+        WebViewController()
+          ..setJavaScriptMode(JavaScriptMode.unrestricted)
+          ..setNavigationDelegate(
+            NavigationDelegate(
+              onPageFinished: (String url) async {
+                // Only check after we've seen a login attempt
+                if (_loginAttempted &&
+                    (url.contains('/forums/index.php') ||
+                        url.contains('/account/') ||
+                        url.contains('/members/'))) {
+                  await _verifyLoginSuccess();
+                }
+              },
+              onNavigationRequest: (NavigationRequest request) {
+                // Detect login form submission
+                if (request.url.contains('/login/login')) {
+                  _loginAttempted = true;
+                }
+                // Handle auth redirects
+                if (request.url.startsWith('khinsider://auth')) {
+                  widget.onLoginSuccess();
+                  if (mounted) Navigator.pop(context);
+                  return NavigationDecision.prevent;
+                }
+                return NavigationDecision.navigate;
+              },
+            ),
+          )
+          ..loadRequest(Uri.parse(widget.url));
+  }
+
+  Future<void> _verifyLoginSuccess() async {
+    final directory = await getApplicationDocumentsDirectory();
+    final cookieJar = PersistCookieJar(storage: FileStorage(directory.path));
+
+    // 1. First try getting cookies via Android CookieManager
+    if (_controller.platform is AndroidWebViewController) {
+      final androidController =
+          _controller.platform as AndroidWebViewController;
+      try {
+        final cookies = await androidController.getCookies();
+        if (cookies.any((c) => c.name == 'xf_session')) {
+          await cookieJar.saveFromResponse(
+            Uri.parse('https://downloads.khinsider.com'),
+            cookies.map((c) => Cookie(c.name, c.value)).toList(),
+          );
+          widget.onLoginSuccess();
+          if (mounted) Navigator.pop(context);
+          return;
+        }
+      } catch (e) {
+        debugPrint('Android cookie error: $e');
+      }
+    }
+
+    // 2. Fallback to JavaScript cookie check
+    try {
+      final cookieString =
+          await _controller.runJavaScriptReturningResult('document.cookie')
+              as String;
+
+      if (cookieString.contains('xf_session')) {
+        final cookies =
+            cookieString
+                .split(';')
+                .map((c) => Cookie.fromSetCookieValue(c.trim()))
+                .toList();
+
+        await cookieJar.saveFromResponse(
+          Uri.parse('https://downloads.khinsider.com'),
+          cookies,
+        );
+        widget.onLoginSuccess();
+        if (mounted) Navigator.pop(context);
+        return;
+      }
+    } catch (e) {
+      debugPrint('JS cookie error: $e');
+    }
+
+    debugPrint('No valid session cookies found');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Login')),
+      body: Column(
+        children: [
+          Expanded(child: WebViewWidget(controller: _controller)),
+          if (_loginAttempted)
+            const Padding(
+              padding: EdgeInsets.all(8.0),
+              child: LinearProgressIndicator(),
+            ),
+        ],
+      ),
+    );
+  }
+}
 
 class PreferencesManager {
   static const String _backupFileName = 'shared_prefs_backup.json';
@@ -260,13 +388,13 @@ class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key, required this.onThemeChanged});
 
   @override
-  State<SearchScreen> createState() => _SearchScreenState();
+  State<SearchScreen> createState() => SearchScreenState();
 }
 
-class _SearchScreenState extends State<SearchScreen>
+class SearchScreenState extends State<SearchScreen>
     with WidgetsBindingObserver {
   final TextEditingController _searchController = TextEditingController();
-  final http.Client _httpClient = http.Client();
+  final http.Client _httpClient = PersistentHttpClient();
   final AudioPlayer _player = AudioPlayer();
   final AppLinks _appLinks = AppLinks();
   late final ValueNotifier<SongState> _songState;
@@ -277,13 +405,14 @@ class _SearchScreenState extends State<SearchScreen>
   ConcatenatingAudioSource? _playlist;
   List<Map<String, dynamic>> _songs = [];
   Map<String, String>? _selectedAlbum;
-  List<Map<String, dynamic>> _favorites = [];
+  List<Map<String, dynamic>> _playlists = [];
   int _currentNavIndex = 0;
-  bool _isFavoritesSelected = false;
+  bool _isPlaylistSelected = false;
   List<String> _albumTypes = ['All'];
   String _selectedType = 'All';
   StreamSubscription? _uriLinkSubscription;
   bool _isDeepLinkLoading = false;
+  bool _isLoggedIn = false;
 
   @override
   void initState() {
@@ -307,7 +436,10 @@ class _SearchScreenState extends State<SearchScreen>
 
   Future<void> _init() async {
     await _loadPreferences();
-    await _loadFavorites();
+    await _checkLoginStatus();
+    if (_isLoggedIn) {
+      await _loadPlaylists();
+    }
     await _restorePlaybackState();
     await _initDeepLinks();
   }
@@ -330,6 +462,32 @@ class _SearchScreenState extends State<SearchScreen>
     }
   }
 
+  Future<void> _checkLoginStatus() async {
+    final prefs = await SharedPreferences.getInstance();
+    final url = Uri.parse('https://downloads.khinsider.com/playlist/browse');
+    final response = await _httpClient.get(url);
+    final isLoggedIn =
+        response.statusCode == 200 &&
+        !response.body.contains('login') &&
+        !response.body.contains('Login') &&
+        !response.body.contains('form id="login"');
+    debugPrint(
+      'Login status check: isLoggedIn=$isLoggedIn, Status: ${response.statusCode}',
+    );
+    setState(() {
+      _isLoggedIn = isLoggedIn;
+    });
+    await prefs.setBool('isLoggedIn', isLoggedIn);
+    if (isLoggedIn) {
+      await _loadPlaylists();
+    } else {
+      debugPrint('Session invalid, clearing cookies');
+      final directory = await getApplicationDocumentsDirectory();
+      final cookieJar = PersistCookieJar(storage: FileStorage(directory.path));
+      await cookieJar.deleteAll();
+    }
+  }
+
   Future<void> _savePlaybackState() async {
     final currentSongUrl = _songState.value.url;
     if (currentSongUrl == null || _playlist == null) return;
@@ -337,12 +495,10 @@ class _SearchScreenState extends State<SearchScreen>
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('currentSongUrl', currentSongUrl);
     await prefs.setInt('currentSongIndex', _songState.value.index);
-    await prefs.setBool('isFavoritesSelected', _isFavoritesSelected);
     await prefs.setInt('playbackPosition', _player.position.inSeconds);
 
-    final songList = _isFavoritesSelected ? _favorites : _songs;
     final songsJson = jsonEncode(
-      songList.map((song) {
+      _songs.map((song) {
         final mediaItem =
             (song['audioSource'] as ProgressiveAudioSource).tag as MediaItem;
         return {
@@ -355,6 +511,8 @@ class _SearchScreenState extends State<SearchScreen>
           'albumUrl': song['albumUrl'],
           'index': song['index'],
           'songPageUrl': song['songPageUrl'],
+          'songId': song['songId'],
+          'playlistId': song['playlistId'],
         };
       }).toList(),
     );
@@ -370,7 +528,6 @@ class _SearchScreenState extends State<SearchScreen>
     }
 
     final currentSongIndex = prefs.getInt('currentSongIndex') ?? 0;
-    final isFavoritesSelected = prefs.getBool('isFavoritesSelected') ?? false;
     final playbackPosition = prefs.getInt('playbackPosition') ?? 0;
     final songsJson = prefs.getString('playlistSongs');
 
@@ -403,11 +560,13 @@ class _SearchScreenState extends State<SearchScreen>
               'albumUrl': map['albumUrl'] ?? '',
               'index': map['index'] ?? 0,
               'songPageUrl': map['songPageUrl'] ?? '',
+              'songId': map['songId'] ?? '',
+              'playlistId': map['playlistId'] ?? '',
             };
           }).toList();
 
       setState(() {
-        _isFavoritesSelected = isFavoritesSelected;
+        _songs = restoredSongs;
         _playlist = ConcatenatingAudioSource(
           children:
               restoredSongs
@@ -418,7 +577,7 @@ class _SearchScreenState extends State<SearchScreen>
       });
 
       debugPrint(
-        'Restored playback: index=$currentSongIndex, url=$currentSongUrl, isFavorites=$isFavoritesSelected, songCount=${restoredSongs.length}',
+        'Restored playback: index=$currentSongIndex, url=$currentSongUrl, songCount=${restoredSongs.length}',
       );
 
       _songState.value = SongState(currentSongIndex, currentSongUrl);
@@ -459,7 +618,11 @@ class _SearchScreenState extends State<SearchScreen>
     _uriLinkSubscription = _appLinks.uriLinkStream.listen(
       (Uri? uri) {
         if (uri != null) {
-          _handleDeepLink(uri);
+          if (uri.toString().startsWith('khinsider://auth')) {
+            _handleLoginRedirect();
+          } else {
+            _handleDeepLink(uri);
+          }
         }
       },
       onError: (e) {
@@ -469,6 +632,179 @@ class _SearchScreenState extends State<SearchScreen>
         ).showSnackBar(SnackBar(content: Text('Failed to process link: $e')));
       },
     );
+  }
+
+  Future<void> _handleLoginRedirect() async {
+    debugPrint('Handling login redirect');
+    final prefs = await SharedPreferences.getInstance();
+    final directory = await getApplicationDocumentsDirectory();
+    final cookieJar = PersistCookieJar(storage: FileStorage(directory.path));
+    final cookies = await cookieJar.loadForRequest(
+      Uri.parse('https://downloads.khinsider.com'),
+    );
+    debugPrint('Cookies after login: ${cookies.map((c) => c.name).join(', ')}');
+
+    setState(() {
+      _isLoggedIn = true;
+    });
+    await prefs.setBool('isLoggedIn', true);
+    debugPrint('Login state set to true, loading playlists');
+    await _loadPlaylists();
+  }
+
+  Future<void> _handleDeepLink(Uri uri) async {
+    if (uri.host != 'downloads.khinsider.com') {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Unsupported deep link.')));
+      return;
+    }
+
+    setState(() {
+      _isDeepLinkLoading = true;
+      _selectedAlbum = null;
+      _songs = [];
+      _playlist = null;
+      _isPlaylistSelected = false;
+    });
+    _songState.value = SongState(0, null);
+
+    try {
+      await _loadPreferences();
+
+      if (uri.path.endsWith('.mp3')) {
+        final songData = await _parseSongPage(uri.toString());
+        final mp3Url = songData['mp3Url']!;
+        final albumUrl = songData['albumUrl']!;
+        final songName = songData['songName']!;
+        final fallbackAlbumName = songData['albumName']!;
+        final songPageUrl = songData['songPageUrl']!;
+
+        if (mp3Url.isEmpty || albumUrl.isEmpty) {
+          throw Exception('Invalid song page: missing MP3 or album URL');
+        }
+
+        try {
+          await _fetchAlbumPage(
+            albumUrl.replaceFirst('https://downloads.khinsider.com', ''),
+          );
+
+          int songIndex = _songs.indexWhere(
+            (song) => song['songPageUrl'] == songPageUrl,
+          );
+          if (songIndex == -1) {
+            songIndex = _songs.indexWhere(
+              (song) =>
+                  (song['audioSource'] as ProgressiveAudioSource).uri
+                      .toString() ==
+                  mp3Url,
+            );
+          }
+          if (songIndex == -1) {
+            throw Exception('Song not found in album song list');
+          }
+
+          setState(() {
+            _playlist = ConcatenatingAudioSource(
+              children:
+                  _songs
+                      .map((song) => song['audioSource'] as AudioSource)
+                      .toList(),
+            );
+            _isPlayerExpanded = true;
+          });
+
+          await _playAudioSourceAtIndex(songIndex, false);
+        } catch (e) {
+          debugPrint('Error fetching album page: $e');
+          final audioSource = ProgressiveAudioSource(
+            Uri.parse(mp3Url),
+            tag: MediaItem(
+              id: mp3Url,
+              title: songName,
+              album: fallbackAlbumName,
+              artist: fallbackAlbumName,
+              artUri: null,
+            ),
+          );
+
+          final song = {
+            'audioSource': audioSource,
+            'runtime': 'Unknown',
+            'albumUrl': albumUrl.replaceFirst(
+              'https://downloads.khinsider.com',
+              '',
+            ),
+            'index': 0,
+            'songPageUrl': songPageUrl,
+            'songId': '',
+            'playlistId': '',
+          };
+
+          setState(() {
+            _selectedAlbum = {
+              'albumName': fallbackAlbumName,
+              'albumUrl': albumUrl,
+              'imageUrl': '',
+              'type': '',
+              'year': '',
+              'platform': '',
+            };
+            _songs = [song];
+            _playlist = ConcatenatingAudioSource(children: [audioSource]);
+            _isPlayerExpanded = true;
+          });
+
+          await _playAudioSourceAtIndex(0, false);
+        }
+      } else if (uri.path.startsWith('/playlist/') &&
+          !uri.path.endsWith('/browse')) {
+        final playlistUrl = uri.path;
+        final playlistData = await _fetchPlaylistPage(playlistUrl);
+
+        if (_songs.isEmpty) {
+          throw Exception('Playlist not found or no songs available');
+        }
+
+        setState(() {
+          _selectedAlbum = {
+            'albumName': playlistData['name'] ?? 'Shared Playlist',
+            'albumUrl': playlistUrl,
+            'imageUrl': playlistData['imageUrl'] ?? '',
+            'type': 'Playlist',
+            'year': '',
+            'platform': '',
+          };
+          _isPlaylistSelected = true;
+          _isPlayerExpanded = false;
+        });
+      } else if (uri.path.startsWith('/game-soundtracks/album')) {
+        final albumUrl = uri.path;
+        await _fetchAlbumPage(albumUrl);
+
+        if (_songs.isEmpty) {
+          throw Exception('Album not found or no songs available');
+        }
+
+        setState(() {
+          _isPlayerExpanded = false;
+        });
+      } else {
+        throw Exception('Unsupported deep link');
+      }
+
+      setState(() {
+        _isDeepLinkLoading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _isDeepLinkLoading = false;
+      });
+      debugPrint('Error handling deep link: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to load song, album, or playlist: $e')),
+      );
+    }
   }
 
   Future<Map<String, String>> _parseSongPage(String songPageUrl) async {
@@ -518,144 +854,6 @@ class _SearchScreenState extends State<SearchScreen>
     };
   }
 
-  Future<void> _handleDeepLink(Uri uri) async {
-    if (uri.host != 'downloads.khinsider.com' ||
-        !uri.path.startsWith('/game-soundtracks/album')) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Unsupported deep link.')));
-      return;
-    }
-
-    setState(() {
-      _isDeepLinkLoading = true;
-      _selectedAlbum = null;
-      _songs = [];
-      _playlist = null;
-      _isFavoritesSelected = false;
-    });
-    _songState.value = SongState(0, null);
-
-    try {
-      await _loadPreferences();
-
-      if (uri.path.endsWith('.mp3')) {
-        // Handle song page deep link
-        final songData = await _parseSongPage(uri.toString());
-        final mp3Url = songData['mp3Url']!;
-        final albumUrl = songData['albumUrl']!;
-        final songName = songData['songName']!;
-        final fallbackAlbumName = songData['albumName']!;
-        final songPageUrl = songData['songPageUrl']!;
-
-        if (mp3Url.isEmpty || albumUrl.isEmpty) {
-          throw Exception('Invalid song page: missing MP3 or album URL');
-        }
-
-        // Fetch album page for full metadata and song list
-        try {
-          await _fetchAlbumPage(
-            albumUrl.replaceFirst('https://downloads.khinsider.com', ''),
-          );
-
-          // Find the index of the deep-linked song in the album's song list
-          int songIndex = _songs.indexWhere(
-            (song) => song['songPageUrl'] == songPageUrl,
-          );
-          if (songIndex == -1) {
-            // Fallback to matching by MP3 URL
-            songIndex = _songs.indexWhere(
-              (song) =>
-                  (song['audioSource'] as ProgressiveAudioSource).uri
-                      .toString() ==
-                  mp3Url,
-            );
-          }
-          if (songIndex == -1) {
-            throw Exception('Song not found in album song list');
-          }
-
-          // Set playlist with all album songs
-          setState(() {
-            _playlist = ConcatenatingAudioSource(
-              children:
-                  _songs
-                      .map((song) => song['audioSource'] as AudioSource)
-                      .toList(),
-            );
-            _isPlayerExpanded = true;
-          });
-
-          await _playAudioSourceAtIndex(songIndex, false);
-        } catch (e) {
-          debugPrint('Error fetching album page: $e');
-          // Fallback to single-song playlist with song page metadata
-          final audioSource = ProgressiveAudioSource(
-            Uri.parse(mp3Url),
-            tag: MediaItem(
-              id: mp3Url,
-              title: songName,
-              album: fallbackAlbumName,
-              artist: fallbackAlbumName,
-              artUri: null,
-            ),
-          );
-
-          final song = {
-            'audioSource': audioSource,
-            'runtime': 'Unknown',
-            'albumUrl': albumUrl.replaceFirst(
-              'https://downloads.khinsider.com',
-              '',
-            ),
-            'index': 0,
-            'songPageUrl': songPageUrl,
-          };
-
-          setState(() {
-            _selectedAlbum = {
-              'albumName': fallbackAlbumName,
-              'albumUrl': albumUrl,
-              'imageUrl': '',
-              'type': '',
-              'year': '',
-              'platform': '',
-            };
-            _songs = [song];
-            _playlist = ConcatenatingAudioSource(children: [audioSource]);
-            _isPlayerExpanded = true;
-          });
-
-          await _playAudioSourceAtIndex(0, false);
-        }
-      } else {
-        // Handle album page deep link
-        final albumUrl = uri.path;
-        await _fetchAlbumPage(albumUrl);
-
-        if (_songs.isEmpty) {
-          throw Exception('Album not found or no songs available');
-        }
-
-        setState(() {
-          _isPlayerExpanded = false;
-        });
-      }
-
-      setState(() {
-        _isDeepLinkLoading = false;
-      });
-    } catch (e) {
-      setState(() {
-        _isDeepLinkLoading = false;
-      });
-      debugPrint('Error handling deep link: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to load song or album: $e')),
-      );
-    }
-  }
-
   Future<void> _loadPreferences() async {
     final shuffleEnabled =
         PreferencesManager.getBool('shuffleEnabled') ?? false;
@@ -677,42 +875,6 @@ class _SearchScreenState extends State<SearchScreen>
     await _player.setLoopMode(loopMode);
   }
 
-  Future<void> _loadFavorites() async {
-    final favoritesJson = PreferencesManager.getString('favorites');
-    if (favoritesJson != null) {
-      try {
-        final List<dynamic> favoritesList = jsonDecode(favoritesJson);
-        setState(() {
-          _favorites =
-              favoritesList.map((item) {
-                final map = item as Map<String, dynamic>;
-                final mediaItem = MediaItem(
-                  id: map['id'],
-                  title: map['title'],
-                  album: map['album'],
-                  artist: map['artist'],
-                  artUri:
-                      map['artUri'] != null ? Uri.parse(map['artUri']) : null,
-                );
-                return {
-                  'audioSource': ProgressiveAudioSource(
-                    Uri.parse(map['id']),
-                    tag: mediaItem,
-                  ),
-                  'runtime': map['runtime'] ?? 'Unknown',
-                  'albumUrl': map['albumUrl'] ?? '',
-                  'index': map['index'] ?? 0,
-                  'songPageUrl': map['songPageUrl'] ?? '',
-                };
-              }).toList();
-        });
-        debugPrint('Loaded ${_favorites.length} favorite songs');
-      } catch (e) {
-        debugPrint('Error loading favorites: $e');
-      }
-    }
-  }
-
   Future<void> _savePreferences() async {
     await PreferencesManager.setBool('shuffleEnabled', _isShuffleEnabled);
     await PreferencesManager.setString(
@@ -725,25 +887,119 @@ class _SearchScreenState extends State<SearchScreen>
     );
   }
 
-  Future<void> _saveFavorites() async {
-    final favoritesJson = jsonEncode(
-      _favorites.map((song) {
-        final mediaItem =
-            (song['audioSource'] as ProgressiveAudioSource).tag as MediaItem;
-        return {
-          'id': mediaItem.id,
-          'title': mediaItem.title,
-          'album': mediaItem.album,
-          'artist': mediaItem.artist,
-          'artUri': mediaItem.artUri?.toString(),
-          'runtime': song['runtime'],
-          'albumUrl': song['albumUrl'],
-          'index': song['index'],
-          'songPageUrl': song['songPageUrl'],
-        };
-      }).toList(),
+  Future<void> _loadPlaylists() async {
+    try {
+      final playlists = await _fetchPlaylists();
+      setState(() {
+        _playlists = playlists;
+      });
+      debugPrint('Loaded ${_playlists.length} playlists');
+    } catch (e) {
+      debugPrint('Error loading playlists: $e');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to load playlists: $e')));
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchPlaylists() async {
+    final url = Uri.parse('https://downloads.khinsider.com/playlist/browse');
+    final response = await _httpClient.get(url);
+    debugPrint('Playlist response status: ${response.statusCode}');
+    debugPrint('Playlist response body: ${response.body.substring(0, 500)}');
+    if (response.statusCode == 200) {
+      if (response.body.contains('login') ||
+          response.body.contains('Login') ||
+          response.body.contains('form id="login"')) {
+        debugPrint('Playlist request redirected to login page');
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool('isLoggedIn', false);
+        setState(() {
+          _isLoggedIn = false;
+        });
+        throw Exception('Session expired or invalid. Please log in again.');
+      }
+      return await compute(parsePlaylists, response.body);
+    } else if (response.statusCode == 401 || response.statusCode == 403) {
+      debugPrint('Unauthorized or forbidden access');
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('isLoggedIn', false);
+      setState(() {
+        _isLoggedIn = false;
+      });
+      throw Exception('Authentication required. Please log in.');
+    } else {
+      throw Exception('Failed to load playlists: ${response.statusCode}');
+    }
+  }
+
+  Future<void> _createPlaylist(String name) async {
+    if (name.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Playlist name cannot be empty')),
+      );
+      return;
+    }
+
+    try {
+      final url = Uri.parse(
+        'https://downloads.khinsider.com/playlist/add?name=${Uri.encodeQueryComponent(name)}',
+      );
+      final response = await _httpClient.get(url);
+      if (response.statusCode == 200) {
+        await _loadPlaylists();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Playlist created successfully')),
+        );
+      } else {
+        throw Exception('Failed to create playlist: ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('Error creating playlist: $e');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to create playlist: $e')));
+    }
+  }
+
+  Future<void> _addSongToPlaylists(
+    String songId,
+    List<String> playlistIds,
+  ) async {
+    if (!_isLoggedIn) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please log in to add songs to playlists.'),
+        ),
+      );
+      return;
+    }
+
+    for (final playlistId in playlistIds) {
+      try {
+        final url = Uri.parse(
+          'https://downloads.khinsider.com/playlist/popup_toggle?songid=$songId&playlistid=$playlistId',
+        );
+        final response = await _httpClient.get(url);
+        if (response.statusCode == 200) {
+          debugPrint('Song $songId added to playlist $playlistId successfully');
+        } else {
+          throw Exception(
+            'Failed to add song to playlist: ${response.statusCode}',
+          );
+        }
+      } catch (e) {
+        debugPrint('Error adding song $songId to playlist $playlistId: $e');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to add song to playlist $playlistId: $e'),
+          ),
+        );
+      }
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Song added to selected playlists')),
     );
-    await PreferencesManager.setString('favorites', favoritesJson);
   }
 
   Future<List<Map<String, String>>> _fetchAlbumsAsync(String query) async {
@@ -768,10 +1024,9 @@ class _SearchScreenState extends State<SearchScreen>
     _savePlaybackState();
   }
 
-  Future<void> _playAudioSourceAtIndex(int index, bool isFavorites) async {
+  Future<void> _playAudioSourceAtIndex(int index, bool isPlaylist) async {
     try {
-      final songList = isFavorites ? _favorites : _songs;
-      if (index >= songList.length) {
+      if (index >= _songs.length) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Cannot play song: invalid index.')),
         );
@@ -780,17 +1035,14 @@ class _SearchScreenState extends State<SearchScreen>
       setState(() {
         _playlist = ConcatenatingAudioSource(
           children:
-              songList
-                  .map((song) => song['audioSource'] as AudioSource)
-                  .toList(),
+              _songs.map((song) => song['audioSource'] as AudioSource).toList(),
         );
-        _isFavoritesSelected = isFavorites;
+        _isPlaylistSelected = isPlaylist;
         _isPlayerExpanded = true;
       });
       _songState.value = SongState(
         index,
-        (songList[index]['audioSource'] as ProgressiveAudioSource).uri
-            .toString(),
+        (_songs[index]['audioSource'] as ProgressiveAudioSource).uri.toString(),
       );
       await _player.setAudioSource(_playlist!, initialIndex: index);
       await _player.play();
@@ -856,19 +1108,15 @@ class _SearchScreenState extends State<SearchScreen>
         final metadataParagraph = document.querySelector('p[align="left"]');
         if (metadataParagraph != null) {
           final rawInnerHtml = metadataParagraph.innerHtml;
-          debugPrint('Raw metadata HTML: "$rawInnerHtml"');
           final metadataLines =
               rawInnerHtml
                   .split(RegExp(r'<br\s*/?>'))
                   .map((line) => line.trim())
                   .toList();
-          debugPrint('Split metadata lines: $metadataLines');
           for (final line in metadataLines) {
             if (line.isEmpty) continue;
             String text = line.replaceAll(RegExp(r'<[^>]+>'), '').trim();
             text = text.replaceAll(RegExp(r'\s+'), ' ');
-            debugPrint('Cleaned metadata line: "$text"');
-            if (text.isEmpty) continue;
             if (RegExp(
               r'^(Platforms?|Platform)\s*:',
               caseSensitive: false,
@@ -883,7 +1131,6 @@ class _SearchScreenState extends State<SearchScreen>
                         '',
                       )
                       .trim();
-              debugPrint('Extracted platform: "$platform"');
             } else if (RegExp(
               r'^Year\s*:',
               caseSensitive: false,
@@ -895,7 +1142,6 @@ class _SearchScreenState extends State<SearchScreen>
                         '',
                       )
                       .trim();
-              debugPrint('Extracted year: "$year"');
             } else if (RegExp(
               r'^(Album type|Type)\s*:',
               caseSensitive: false,
@@ -907,11 +1153,8 @@ class _SearchScreenState extends State<SearchScreen>
                         '',
                       )
                       .trim();
-              debugPrint('Extracted type: "$type"');
             }
           }
-        } else {
-          debugPrint('No metadata paragraph found for $fullUrl');
         }
 
         if (type.isEmpty || year.isEmpty || platform.isEmpty) {
@@ -920,7 +1163,6 @@ class _SearchScreenState extends State<SearchScreen>
                   .querySelector('meta[name="description"]')
                   ?.attributes['content'] ??
               '';
-          debugPrint('Meta description: "$metaDescription"');
           if (metaDescription.isNotEmpty) {
             final regex = RegExp(
               r'\(([^)]+)\)\s*\((gamerip|soundtrack|singles|arrangements|remixes|compilations|inspired by)\)\s*\((\d{4})\)',
@@ -932,16 +1174,9 @@ class _SearchScreenState extends State<SearchScreen>
                 platform = match.group(1)?.trim() ?? platform;
               if (type.isEmpty) type = match.group(2)?.trim() ?? type;
               if (year.isEmpty) year = match.group(3)?.trim() ?? year;
-              debugPrint(
-                'Fallback extracted: platform="$platform", type="$type", year="$year"',
-              );
             }
           }
         }
-
-        debugPrint(
-          'Final parsed metadata: type="$type", year="$year", platform="$platform"',
-        );
 
         setState(() {
           _selectedAlbum = {
@@ -954,26 +1189,18 @@ class _SearchScreenState extends State<SearchScreen>
           };
         });
 
-        final songs = await compute(
-          (input) => parseSongList(
-            input['body']!,
-            input['albumName']!,
-            input['imageUrl']!,
-            input['albumUrl']!,
-          ),
-          {
-            'body': response.body,
-            'albumName': albumName,
-            'imageUrl': imageUrl,
-            'albumUrl': albumUrl,
-          },
-        );
+        final songs = await compute(parseSongList, {
+          'body': response.body,
+          'albumName': albumName,
+          'imageUrl': imageUrl,
+          'albumUrl': albumUrl,
+          'isPlaylist': false,
+        });
 
         setState(() {
           _songs = songs;
         });
       } else {
-        debugPrint('Error: ${response.statusCode}');
         throw Exception('Failed to load album page: ${response.statusCode}');
       }
     } catch (e) {
@@ -982,36 +1209,54 @@ class _SearchScreenState extends State<SearchScreen>
     }
   }
 
+  Future<Map<String, dynamic>> _fetchPlaylistPage(String playlistUrl) async {
+    final fullUrl = 'https://downloads.khinsider.com$playlistUrl';
+    try {
+      final response = await _httpClient.get(Uri.parse(fullUrl));
+      if (response.statusCode == 200) {
+        final document = html_parser.parse(response.body);
+        final name =
+            document
+                .querySelector('#playlistTitle')
+                ?.text
+                .replaceFirst('Playlist:', '')
+                .trim()
+                .split(RegExp(r'\s*(<a.*)|(\s\s\s.*)'))
+                .first ??
+            'Shared Playlist';
+        final songs = await compute(parseSongList, {
+          'body': response.body,
+          'albumName': name,
+          'imageUrl': '', // Will be set from first song
+          'albumUrl': playlistUrl,
+          'isPlaylist': true,
+        });
+
+        String imageUrl = '';
+        if (songs.isNotEmpty) {
+          final firstSong = songs.first;
+          final mediaItem =
+              (firstSong['audioSource'] as ProgressiveAudioSource).tag
+                  as MediaItem;
+          imageUrl = mediaItem.artUri?.toString() ?? '';
+        }
+
+        setState(() {
+          _songs = songs;
+        });
+
+        return {'name': name, 'imageUrl': imageUrl};
+      } else {
+        throw Exception('Failed to load playlist page: ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('Error occurred while fetching playlist page: $e');
+      throw e;
+    }
+  }
+
   String _getHighResImageUrl(String url) {
     return url.replaceFirst('/thumbs/', '/');
-  }
-
-  void _toggleFavorite(Map<String, dynamic> song) {
-    setState(() {
-      final mediaItem =
-          (song['audioSource'] as ProgressiveAudioSource).tag as MediaItem;
-      if (_favorites.any(
-        (fav) =>
-            (fav['audioSource'] as ProgressiveAudioSource).tag.id ==
-            mediaItem.id,
-      )) {
-        _favorites.removeWhere(
-          (fav) =>
-              (fav['audioSource'] as ProgressiveAudioSource).tag.id ==
-              mediaItem.id,
-        );
-      } else {
-        _favorites.add(song);
-      }
-    });
-    _saveFavorites();
-  }
-
-  bool _isFavorited(MediaItem mediaItem) {
-    return _favorites.any(
-      (fav) =>
-          (fav['audioSource'] as ProgressiveAudioSource).tag.id == mediaItem.id,
-    );
   }
 
   void _shareAlbum(String albumUrl) {
@@ -1029,6 +1274,108 @@ class _SearchScreenState extends State<SearchScreen>
     }
     final shareUrl = songPageUrl;
     Share.share(shareUrl, subject: 'Check out this song!');
+  }
+
+  Future<void> _showAddToPlaylistDialog(String songId) async {
+    if (!_isLoggedIn) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please log in to add songs to playlists.'),
+        ),
+      );
+      return;
+    }
+
+    final selectedPlaylists = <String>[];
+    await showDialog(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: const Text('Add to Playlists'),
+            content: StatefulBuilder(
+              builder:
+                  (context, setDialogState) => SizedBox(
+                    width: double.maxFinite,
+                    child:
+                        _playlists.isEmpty
+                            ? const Text('No playlists available.')
+                            : ListView(
+                              shrinkWrap: true,
+                              children:
+                                  _playlists.map((playlist) {
+                                    final playlistId =
+                                        (playlist['url'] as String)
+                                            .split('/')
+                                            .last;
+                                    return CheckboxListTile(
+                                      title: Text(playlist['name'] as String),
+                                      value: selectedPlaylists.contains(
+                                        playlistId,
+                                      ),
+                                      onChanged: (value) {
+                                        setDialogState(() {
+                                          if (value == true) {
+                                            selectedPlaylists.add(playlistId);
+                                          } else {
+                                            selectedPlaylists.remove(
+                                              playlistId,
+                                            );
+                                          }
+                                        });
+                                      },
+                                    );
+                                  }).toList(),
+                            ),
+                  ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () {
+                  if (selectedPlaylists.isNotEmpty) {
+                    _addSongToPlaylists(songId, selectedPlaylists);
+                  }
+                  Navigator.pop(context);
+                },
+                child: const Text('Add'),
+              ),
+            ],
+          ),
+    );
+  }
+
+  Future<void> _showCreatePlaylistDialog() async {
+    final controller = TextEditingController();
+    await showDialog(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: const Text('Create Playlist'),
+            content: TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                labelText: 'Playlist Name',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () {
+                  _createPlaylist(controller.text);
+                  Navigator.pop(context);
+                },
+                child: const Text('Create'),
+              ),
+            ],
+          ),
+    );
   }
 
   Widget _buildAlbumList() {
@@ -1118,7 +1465,7 @@ class _SearchScreenState extends State<SearchScreen>
                       onTap: () {
                         setState(() {
                           _selectedAlbum = Map<String, String>.from(album);
-                          _isFavoritesSelected = false;
+                          _isPlaylistSelected = false;
                         });
                         _fetchAlbumPage(album['albumUrl']!);
                       },
@@ -1135,7 +1482,7 @@ class _SearchScreenState extends State<SearchScreen>
 
   Widget _buildSongList() {
     if (_selectedAlbum == null) {
-      return const Center(child: Text('No album selected.'));
+      return const Center(child: Text('No album or playlist selected.'));
     }
     return ListView(
       children: [
@@ -1198,7 +1545,7 @@ class _SearchScreenState extends State<SearchScreen>
           final mediaItem = audioSource.tag as MediaItem;
           return ListTile(
             title: Text(
-              audioSource.tag.title ?? 'Unknown',
+              mediaItem.title ?? 'Unknown',
               overflow: TextOverflow.ellipsis,
             ),
             subtitle: Text(song['runtime'] ?? 'Unknown'),
@@ -1206,13 +1553,8 @@ class _SearchScreenState extends State<SearchScreen>
               mainAxisSize: MainAxisSize.min,
               children: [
                 IconButton(
-                  icon: Icon(
-                    _isFavorited(mediaItem)
-                        ? Icons.favorite
-                        : Icons.favorite_border,
-                    color: _isFavorited(mediaItem) ? Colors.red : null,
-                  ),
-                  onPressed: () => _toggleFavorite(song),
+                  icon: const Icon(Icons.playlist_add),
+                  onPressed: () => _showAddToPlaylistDialog(song['songId']),
                 ),
                 IconButton(
                   icon: const Icon(Icons.share),
@@ -1221,7 +1563,7 @@ class _SearchScreenState extends State<SearchScreen>
               ],
             ),
             onTap: () {
-              _playAudioSourceAtIndex(index, false);
+              _playAudioSourceAtIndex(index, _isPlaylistSelected);
             },
           );
         }),
@@ -1230,9 +1572,39 @@ class _SearchScreenState extends State<SearchScreen>
     );
   }
 
-  Widget _buildFavoritesList() {
-    if (_favorites.isEmpty) {
-      return const Center(child: Text('No favorite songs yet.'));
+  Widget _buildPlaylistsList() {
+    if (!_isLoggedIn) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text('Please log in to view your playlists.'),
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder:
+                        (context) => WebViewScreen(
+                          url: 'https://downloads.khinsider.com/forums/login',
+                          onLoginSuccess: () async {
+                            await _handleLoginRedirect();
+                            await _checkLoginStatus();
+                          },
+                        ),
+                  ),
+                );
+              },
+              child: const Text('Log In'),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (_playlists.isEmpty) {
+      return const Center(child: Text('No playlists found.'));
     }
 
     return ListView(
@@ -1243,60 +1615,50 @@ class _SearchScreenState extends State<SearchScreen>
             width: 200,
             height: 200,
             color: Colors.grey[300],
-            child: const Icon(Icons.favorite, size: 100, color: Colors.red),
+            child: const Icon(
+              Icons.playlist_play,
+              size: 100,
+              color: Colors.blue,
+            ),
           ),
         ),
         const SizedBox(height: 12),
         const Text(
-          'Favorites',
+          'Playlists',
           style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
           textAlign: TextAlign.center,
         ),
         const SizedBox(height: 24),
-        ..._favorites.asMap().entries.map((entry) {
+        ..._playlists.asMap().entries.map((entry) {
           final index = entry.key;
-          final song = entry.value;
-          final audioSource = song['audioSource'] as ProgressiveAudioSource;
-          final mediaItem = audioSource.tag as MediaItem;
+          final playlist = entry.value;
           return ListTile(
             leading:
-                mediaItem.artUri != null
+                playlist['imageUrl']?.isNotEmpty == true
                     ? CircleAvatar(
-                      backgroundImage: NetworkImage(
-                        mediaItem.artUri.toString(),
-                      ),
+                      backgroundImage: NetworkImage(playlist['imageUrl']),
                       radius: 30,
                     )
                     : const CircleAvatar(
                       backgroundColor: Colors.grey,
                       radius: 30,
-                      child: Icon(Icons.music_note, color: Colors.white),
+                      child: Icon(Icons.playlist_play, color: Colors.white),
                     ),
-            title: Text(
-              mediaItem.title ?? 'Unknown',
-              overflow: TextOverflow.ellipsis,
-            ),
-            subtitle: Text(song['runtime'] ?? 'Unknown'),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                IconButton(
-                  icon: Icon(
-                    _isFavorited(mediaItem)
-                        ? Icons.favorite
-                        : Icons.favorite_border,
-                    color: _isFavorited(mediaItem) ? Colors.red : null,
-                  ),
-                  onPressed: () => _toggleFavorite(song),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.share),
-                  onPressed: () => _shareSong(song),
-                ),
-              ],
-            ),
+            title: Text(playlist['name'] ?? 'Unknown'),
+            subtitle: Text('Songs: ${playlist['songCount'] ?? 0}'),
             onTap: () {
-              _playAudioSourceAtIndex(index, true);
+              setState(() {
+                _selectedAlbum = {
+                  'albumName': playlist['name'],
+                  'albumUrl': playlist['url'],
+                  'imageUrl': playlist['imageUrl'] ?? '',
+                  'type': 'Playlist',
+                  'year': '',
+                  'platform': '',
+                };
+                _isPlaylistSelected = true;
+              });
+              _fetchPlaylistPage(playlist['url']);
             },
           );
         }),
@@ -1379,14 +1741,12 @@ class _SearchScreenState extends State<SearchScreen>
                   textAlign: TextAlign.center,
                 ),
                 IconButton(
-                  icon: Icon(
-                    _isFavorited(song) ? Icons.favorite : Icons.favorite_border,
-                    color: _isFavorited(song) ? Colors.red : null,
-                  ),
+                  icon: const Icon(Icons.playlist_add),
                   onPressed: () {
-                    final songList = _isFavoritesSelected ? _favorites : _songs;
-                    if (songState.index < songList.length) {
-                      _toggleFavorite(songList[songState.index]);
+                    if (songState.index < _songs.length) {
+                      _showAddToPlaylistDialog(
+                        _songs[songState.index]['songId'],
+                      );
                     }
                   },
                 ),
@@ -1544,17 +1904,12 @@ class _SearchScreenState extends State<SearchScreen>
                     ),
                   ),
                   IconButton(
-                    icon: Icon(
-                      _isFavorited(song)
-                          ? Icons.favorite
-                          : Icons.favorite_border,
-                      color: _isFavorited(song) ? Colors.red : null,
-                    ),
+                    icon: const Icon(Icons.playlist_add),
                     onPressed: () {
-                      final songList =
-                          _isFavoritesSelected ? _favorites : _songs;
-                      if (songState.index < songList.length) {
-                        _toggleFavorite(songList[songState.index]);
+                      if (songState.index < _songs.length) {
+                        _showAddToPlaylistDialog(
+                          _songs[songState.index]['songId'],
+                        );
                       }
                     },
                   ),
@@ -1595,7 +1950,7 @@ class _SearchScreenState extends State<SearchScreen>
     if (_selectedAlbum != null && _currentNavIndex == 0) {
       setState(() {
         _selectedAlbum = null;
-        _isFavoritesSelected = false;
+        _isPlaylistSelected = false;
       });
       return false;
     }
@@ -1603,7 +1958,7 @@ class _SearchScreenState extends State<SearchScreen>
       setState(() {
         _currentNavIndex = 0;
         _selectedAlbum = null;
-        _isFavoritesSelected = false;
+        _isPlaylistSelected = false;
       });
       return false;
     }
@@ -1632,7 +1987,7 @@ class _SearchScreenState extends State<SearchScreen>
                             onPressed: () {
                               setState(() {
                                 _selectedAlbum = null;
-                                _isFavoritesSelected = false;
+                                _isPlaylistSelected = false;
                               });
                             },
                           )
@@ -1666,7 +2021,7 @@ class _SearchScreenState extends State<SearchScreen>
                               ? (_selectedAlbum == null
                                   ? _buildAlbumList()
                                   : _buildSongList())
-                              : _buildFavoritesList(),
+                              : _buildPlaylistsList(),
                     ),
                   ],
                 ),
@@ -1700,7 +2055,7 @@ class _SearchScreenState extends State<SearchScreen>
                     setState(() {
                       _currentNavIndex = index;
                       _selectedAlbum = null;
-                      _isFavoritesSelected = index == 1;
+                      _isPlaylistSelected = index == 1;
                     });
                     if (index == 2) {
                       Navigator.push(
@@ -1715,7 +2070,7 @@ class _SearchScreenState extends State<SearchScreen>
                         setState(() {
                           _currentNavIndex = 0;
                           _selectedAlbum = null;
-                          _isFavoritesSelected = false;
+                          _isPlaylistSelected = false;
                         });
                       });
                     }
@@ -1726,8 +2081,8 @@ class _SearchScreenState extends State<SearchScreen>
                       label: 'Search',
                     ),
                     BottomNavigationBarItem(
-                      icon: Icon(Icons.favorite),
-                      label: 'Favorites',
+                      icon: Icon(Icons.playlist_play),
+                      label: 'Playlists',
                     ),
                     BottomNavigationBarItem(
                       icon: Icon(Icons.settings),
@@ -1735,9 +2090,79 @@ class _SearchScreenState extends State<SearchScreen>
                     ),
                   ],
                 ),
+        floatingActionButton:
+            _currentNavIndex == 1 && _isLoggedIn && !_isPlayerExpanded
+                ? FloatingActionButton(
+                  onPressed: _showCreatePlaylistDialog,
+                  child: const Icon(Icons.add),
+                )
+                : null,
       ),
     );
   }
+}
+
+class PersistentHttpClient extends http.BaseClient {
+  final http.Client _client = http.Client();
+  final CookieJar _cookieJar;
+
+  PersistentHttpClient() : _cookieJar = CookieJar();
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final directory = await getApplicationDocumentsDirectory();
+    final cookieJar = PersistCookieJar(storage: FileStorage(directory.path));
+    final cookies = await cookieJar.loadForRequest(request.url);
+    final cookieHeader = cookies
+        .map((cookie) => '${cookie.name}=${cookie.value}')
+        .join('; ');
+    request.headers['Cookie'] = cookieHeader;
+
+    // Browser-like headers
+    request.headers['Accept'] =
+        'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8';
+    request.headers['Accept-Encoding'] = 'gzip, deflate, br, zstd';
+    request.headers['Accept-Language'] = 'en-US,en;q=0.9';
+    request.headers['Connection'] = 'keep-alive';
+    request.headers['User-Agent'] =
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36';
+    request.headers['Sec-Fetch-Dest'] = 'document';
+    request.headers['Sec-Fetch-Mode'] = 'navigate';
+    request.headers['Sec-Fetch-Site'] = 'same-origin';
+    request.headers['Upgrade-Insecure-Requests'] = '1';
+
+    // Add CSRF token
+    final prefs = await SharedPreferences.getInstance();
+    final xfToken = prefs.getString('xfToken') ?? '';
+    if (xfToken.isNotEmpty) {
+      request.headers['XF-CSRF'] =
+          xfToken; // Updated to match XenForo convention
+    }
+
+    debugPrint('Request: ${request.url}, Cookies: $cookieHeader');
+    debugPrint('Request Headers: ${request.headers}');
+
+    final response = await _client.send(request);
+
+    final responseCookies = response.headers['set-cookie'];
+    if (responseCookies != null) {
+      final cookies =
+          responseCookies
+              .split(',')
+              .map((c) => Cookie.fromSetCookieValue(c))
+              .toList();
+      await cookieJar.saveFromResponse(request.url, cookies);
+      debugPrint('Saved response cookies: ${cookies.length}');
+    }
+
+    debugPrint(
+      'Response: ${request.url}, Status: ${response.statusCode}, Headers: ${response.headers}',
+    );
+    return response;
+  }
+
+  @override
+  void close() => _client.close();
 }
 
 class SettingsScreen extends StatelessWidget {
@@ -1857,12 +2282,39 @@ List<Map<String, String>> parseAlbumList(String htmlBody) {
       .toList();
 }
 
-Future<List<Map<String, dynamic>>> parseSongList(
-  String htmlBody,
-  String albumName,
-  String albumImageUrl,
-  String albumUrl,
-) async {
+List<Map<String, dynamic>> parsePlaylists(String htmlBody) {
+  final document = html_parser.parse(htmlBody);
+  final rows = document.querySelectorAll('table#top40 tr');
+
+  return rows
+      .skip(1)
+      .map((row) {
+        final cols = row.querySelectorAll('td');
+        if (cols.length < 3) return null;
+
+        final name = cols[1].querySelector('a')?.text.trim() ?? '';
+        final url = cols[1].querySelector('a')?.attributes['href'] ?? '';
+        final songCount = cols[2].text.trim();
+        final imageUrl = cols[0].querySelector('img')?.attributes['src'] ?? '';
+
+        return {
+          'name': name,
+          'url': url,
+          'songCount': songCount,
+          'imageUrl': imageUrl,
+        };
+      })
+      .whereType<Map<String, dynamic>>()
+      .toList();
+}
+
+Future<List<Map<String, dynamic>>> parseSongList(dynamic input) async {
+  final String htmlBody = input['body'] as String;
+  final String albumName = input['albumName'] as String;
+  final String albumImageUrl = input['imageUrl'] as String;
+  final String albumUrl = input['albumUrl'] as String;
+  final bool isPlaylist = input['isPlaylist'] as bool;
+
   final document = html_parser.parse(htmlBody);
   final rows = document.querySelectorAll('#songlist tr');
   final List<Map<String, dynamic>> songs = [];
@@ -1871,7 +2323,10 @@ Future<List<Map<String, dynamic>>> parseSongList(
 
   for (var i = 0; i < rows.length; i++) {
     final row = rows[i];
-    final links = row.querySelectorAll('a');
+    final clickableRow = row.querySelector('.clickable-row');
+    if (clickableRow == null) continue;
+
+    final links = clickableRow.querySelectorAll('a');
     if (links.length < 2) continue;
 
     final name = links[0].text.trim();
@@ -1880,6 +2335,18 @@ Future<List<Map<String, dynamic>>> parseSongList(
     if (href == null || name.isEmpty || runtime.isEmpty) continue;
 
     final detailUrl = 'https://downloads.khinsider.com$href';
+    final albumLink = clickableRow.querySelector(
+      'a[href*="/game-soundtracks/album/"]',
+    );
+    final albumUrlFull = albumLink?.attributes['href'] ?? '';
+    final imageUrl =
+        row
+            .querySelector('.albumIcon img')
+            ?.attributes['src']
+            ?.replaceFirst('/thumbs_small/', '/') ??
+        albumImageUrl;
+    final songId = row.attributes['songid'] ?? '';
+    final playlistId = row.attributes['playlistid'] ?? '';
 
     futures.add(
       pool.withResource(
@@ -1892,18 +2359,17 @@ Future<List<Map<String, dynamic>>> parseSongList(
                   title: name,
                   album: albumName,
                   artist: albumName,
-                  artUri:
-                      albumImageUrl.isNotEmpty
-                          ? Uri.parse(albumImageUrl)
-                          : null,
+                  artUri: imageUrl.isNotEmpty ? Uri.parse(imageUrl) : null,
                 ),
               );
               return {
                 'audioSource': audioSource,
                 'runtime': runtime,
-                'albumUrl': albumUrl,
+                'albumUrl': albumUrlFull.isNotEmpty ? albumUrlFull : albumUrl,
                 'index': i,
                 'songPageUrl': detailUrl,
+                'songId': songId,
+                'playlistId': playlistId,
               };
             })
             .catchError((e) {
