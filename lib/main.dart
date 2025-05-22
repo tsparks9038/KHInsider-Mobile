@@ -349,6 +349,7 @@ class _SearchScreenState extends State<SearchScreen>
           'runtime': song['runtime'],
           'albumUrl': song['albumUrl'],
           'index': song['index'],
+          'songPageUrl': song['songPageUrl'],
         };
       }).toList(),
     );
@@ -386,6 +387,7 @@ class _SearchScreenState extends State<SearchScreen>
             'runtime': map['runtime'],
             'albumUrl': map['albumUrl'],
             'index': map['index'],
+            'songPageUrl': map['songPageUrl'],
           };
         }).toList();
 
@@ -446,6 +448,53 @@ class _SearchScreenState extends State<SearchScreen>
     );
   }
 
+  Future<Map<String, String>> _parseSongPage(String songPageUrl) async {
+    final response = await _httpClient.get(Uri.parse(songPageUrl));
+    if (response.statusCode != 200) {
+      throw Exception('Failed to load song page: ${response.statusCode}');
+    }
+
+    final document = html_parser.parse(response.body);
+    final mp3Url = await _fetchActualMp3UrlStatic(songPageUrl);
+
+    final albumLink = document.querySelector(
+      'a[href*="/game-soundtracks/album/"]',
+    );
+    final albumUrl = albumLink?.attributes['href'] ?? '';
+    final fullAlbumUrl =
+        albumUrl.isNotEmpty ? 'https://downloads.khinsider.com$albumUrl' : '';
+
+    final songNameElement = document.querySelector('p b')?.parent;
+    final songName =
+        songNameElement != null && songNameElement.text.contains('Song name')
+            ? songNameElement.querySelector('b')?.text ?? 'Unknown'
+            : 'Unknown';
+
+    final albumNameElement =
+        document
+            .querySelectorAll('p b')
+            .asMap()
+            .entries
+            .firstWhere(
+              (entry) =>
+                  entry.value.parent?.text.contains('Album name') ?? false,
+              orElse: () => MapEntry(-1, document.createElement('b')),
+            )
+            .value;
+    final albumName =
+        albumNameElement.parent!.text.contains('Album name')
+            ? albumNameElement.text
+            : 'Unknown';
+
+    return {
+      'mp3Url': mp3Url,
+      'albumUrl': fullAlbumUrl,
+      'songName': songName,
+      'albumName': albumName,
+      'songPageUrl': songPageUrl,
+    };
+  }
+
   Future<void> _handleDeepLink(Uri uri) async {
     if (uri.host != 'downloads.khinsider.com' ||
         !uri.path.startsWith('/game-soundtracks/album')) {
@@ -454,9 +503,6 @@ class _SearchScreenState extends State<SearchScreen>
       ).showSnackBar(const SnackBar(content: Text('Unsupported deep link.')));
       return;
     }
-
-    final albumUrl = uri.path;
-    final songIndex = int.tryParse(uri.queryParameters['song'] ?? '');
 
     setState(() {
       _isDeepLinkLoading = true;
@@ -469,34 +515,127 @@ class _SearchScreenState extends State<SearchScreen>
 
     try {
       await _loadPreferences();
-      await _fetchAlbumPage(albumUrl);
-      if (songIndex != null &&
-          songIndex >= 0 &&
-          _songs.isNotEmpty &&
-          songIndex < _songs.length) {
-        await _playAudioSourceAtIndex(songIndex, false);
-        setState(() {
-          _isPlayerExpanded = true;
-          _isDeepLinkLoading = false;
-        });
+
+      if (uri.path.endsWith('.mp3')) {
+        // Handle song page deep link
+        final songData = await _parseSongPage(uri.toString());
+        final mp3Url = songData['mp3Url']!;
+        final albumUrl = songData['albumUrl']!;
+        final songName = songData['songName']!;
+        final fallbackAlbumName = songData['albumName']!;
+        final songPageUrl = songData['songPageUrl']!;
+
+        if (mp3Url.isEmpty || albumUrl.isEmpty) {
+          throw Exception('Invalid song page: missing MP3 or album URL');
+        }
+
+        // Fetch album page for full metadata and song list
+        try {
+          await _fetchAlbumPage(
+            albumUrl.replaceFirst('https://downloads.khinsider.com', ''),
+          );
+
+          // Find the index of the deep-linked song in the album's song list
+          int songIndex = _songs.indexWhere(
+            (song) => song['songPageUrl'] == songPageUrl,
+          );
+          if (songIndex == -1) {
+            // Fallback to matching by MP3 URL
+            songIndex = _songs.indexWhere(
+              (song) =>
+                  (song['audioSource'] as ProgressiveAudioSource).uri
+                      .toString() ==
+                  mp3Url,
+            );
+          }
+          if (songIndex == -1) {
+            throw Exception('Song not found in album song list');
+          }
+
+          // Set playlist with all album songs
+          setState(() {
+            _playlist = ConcatenatingAudioSource(
+              children:
+                  _songs
+                      .map((song) => song['audioSource'] as AudioSource)
+                      .toList(),
+            );
+          });
+
+          // Play the specific song
+          await _playAudioSourceAtIndex(songIndex, false);
+        } catch (e) {
+          debugPrint('Error fetching album page: $e');
+          // Fallback to single-song playlist with song page metadata
+          final audioSource = ProgressiveAudioSource(
+            Uri.parse(mp3Url),
+            tag: MediaItem(
+              id: mp3Url,
+              title: songName,
+              album: fallbackAlbumName,
+              artist: fallbackAlbumName,
+              artUri: null,
+            ),
+          );
+
+          final song = {
+            'audioSource': audioSource,
+            'runtime': 'Unknown',
+            'albumUrl': albumUrl.replaceFirst(
+              'https://downloads.khinsider.com',
+              '',
+            ),
+            'index': 0,
+            'songPageUrl': songPageUrl,
+          };
+
+          setState(() {
+            _selectedAlbum = {
+              'albumName': fallbackAlbumName,
+              'albumUrl': albumUrl,
+              'imageUrl': '',
+              'type': '',
+              'year': '',
+              'platform': '',
+            };
+            _songs = [song];
+            _playlist = ConcatenatingAudioSource(children: [audioSource]);
+          });
+
+          await _playAudioSourceAtIndex(0, false);
+        }
       } else {
+        // Handle album page deep link
+        final albumUrl = uri.path;
+        await _fetchAlbumPage(albumUrl);
+
+        if (_songs.isEmpty) {
+          throw Exception('Album not found or no songs available');
+        }
+
+        // Set playlist with all album songs
         setState(() {
-          _isDeepLinkLoading = false;
+          _playlist = ConcatenatingAudioSource(
+            children:
+                _songs
+                    .map((song) => song['audioSource'] as AudioSource)
+                    .toList(),
+          );
         });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Invalid song index or album not found.'),
-          ),
-        );
       }
+
+      setState(() {
+        _isPlayerExpanded = true;
+        _isDeepLinkLoading = false;
+      });
     } catch (e) {
       setState(() {
         _isDeepLinkLoading = false;
       });
       debugPrint('Error handling deep link: $e');
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed to load album: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to load song or album: $e')),
+      );
     }
   }
 
@@ -545,6 +684,7 @@ class _SearchScreenState extends State<SearchScreen>
                 'runtime': map['runtime'],
                 'albumUrl': map['albumUrl'],
                 'index': map['index'],
+                'songPageUrl': map['songPageUrl'],
               };
             }).toList();
       });
@@ -577,6 +717,7 @@ class _SearchScreenState extends State<SearchScreen>
           'runtime': song['runtime'],
           'albumUrl': song['albumUrl'],
           'index': song['index'],
+          'songPageUrl': song['songPageUrl'],
         };
       }).toList(),
     );
@@ -608,11 +749,9 @@ class _SearchScreenState extends State<SearchScreen>
   Future<void> _playAudioSourceAtIndex(int index, bool isFavorites) async {
     try {
       final songList = isFavorites ? _favorites : _songs;
-      if (songList.isEmpty || index >= songList.length) {
+      if (index >= songList.length) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Cannot play song: invalid playlist or index.'),
-          ),
+          const SnackBar(content: Text('Cannot play song: invalid index.')),
         );
         return;
       }
@@ -859,11 +998,14 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   void _shareSong(Map<String, dynamic> song) {
-    final albumUrl = song['albumUrl'] as String;
-    final index = song['index'] as int;
-    final albumIndex = index - 1;
-    final shareUrl =
-        'https://downloads.khinsider.com$albumUrl?song=$albumIndex';
+    final songPageUrl = song['songPageUrl'] as String?;
+    if (songPageUrl == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Song URL not available for sharing.')),
+      );
+      return;
+    }
+    final shareUrl = songPageUrl;
     Share.share(shareUrl, subject: 'Check out this song!');
   }
 
@@ -1731,6 +1873,7 @@ Future<List<Map<String, dynamic>>> parseSongList(
                 'runtime': runtime,
                 'albumUrl': albumUrl,
                 'index': i,
+                'songPageUrl': detailUrl,
               };
             })
             .catchError((e) {
