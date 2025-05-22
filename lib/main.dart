@@ -560,6 +560,7 @@ class _SearchScreenState extends State<SearchScreen>
                       .map((song) => song['audioSource'] as AudioSource)
                       .toList(),
             );
+            _isPlayerExpanded = true; // Open expanded player for song playback
           });
 
           // Play the specific song
@@ -600,6 +601,7 @@ class _SearchScreenState extends State<SearchScreen>
             };
             _songs = [song];
             _playlist = ConcatenatingAudioSource(children: [audioSource]);
+            _isPlayerExpanded = true; // Open expanded player for fallback
           });
 
           await _playAudioSourceAtIndex(0, false);
@@ -613,19 +615,13 @@ class _SearchScreenState extends State<SearchScreen>
           throw Exception('Album not found or no songs available');
         }
 
-        // Set playlist with all album songs
+        // Display song list without setting playlist or playing a song
         setState(() {
-          _playlist = ConcatenatingAudioSource(
-            children:
-                _songs
-                    .map((song) => song['audioSource'] as AudioSource)
-                    .toList(),
-          );
+          _isPlayerExpanded = false; // Ensure player is not expanded
         });
       }
 
       setState(() {
-        _isPlayerExpanded = true;
         _isDeepLinkLoading = false;
       });
     } catch (e) {
