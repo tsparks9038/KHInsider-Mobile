@@ -47,6 +47,8 @@ dependencies:
   webview_flutter: ^4.13.0
   webview_flutter_android: ^4.7.0
   html_unescape: ^2.0.0
+  webview_flutter_wkwebview: ^3.22.0
+  dio_cookie_manager: ^3.2.0
 
 dev_dependencies:
   flutter_test:

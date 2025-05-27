@@ -16,6 +16,11 @@ import 'package:share_plus/share_plus.dart';
 import 'package:app_links/app_links.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:html_unescape/html_unescape.dart';
+import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
+import 'package:dio_cookie_manager/dio_cookie_manager.dart';
+import 'package:dio/dio.dart';
+import 'package:cookie_jar/cookie_jar.dart';
 
 class Playlist {
   final String name;
@@ -31,25 +36,46 @@ Future<List<Playlist>> fetchPlaylists() async {
     throw Exception('User not logged in');
   }
 
-  // Construct cookie string for HTTP request
   final cookieString = cookies.entries
       .map((e) => '${e.key}=${e.value}')
       .join('; ');
+  final client = http.Client();
+  try {
+    final response = await client.get(
+      Uri.parse('https://downloads.khinsider.com/playlist/browse'),
+      headers: {
+        'Cookie': cookieString,
+        'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+        'Accept':
+            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    );
 
-  final response = await http.get(
-    Uri.parse('https://downloads.khinsider.com/playlist/browse'),
-    headers: {
-      'Cookie': cookieString,
-      'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    },
-  );
+    debugPrint('Playlist GET status: ${response.statusCode}');
+    if (response.statusCode != 200) {
+      throw Exception('Failed to load playlists: ${response.statusCode}');
+    }
 
-  if (response.statusCode != 200) {
-    throw Exception('Failed to load playlists: ${response.statusCode}');
+    final document = html_parser.parse(response.body);
+    final hasLoginForm = document.querySelector('form') != null;
+    if (hasLoginForm) {
+      await PreferencesManager.clearCookies();
+      throw Exception('Session expired, login required');
+    }
+
+    // Save HTML for debugging
+    final directory = await getApplicationDocumentsDirectory();
+    final file = File('${directory.path}/playlist_page.html');
+    await file.writeAsString(response.body);
+    debugPrint('Saved playlist HTML to ${file.path}');
+
+    return parsePlaylists(response.body);
+  } finally {
+    client.close();
   }
-
-  return parsePlaylists(response.body);
 }
 
 List<Playlist> parsePlaylists(String htmlBody) {
@@ -59,13 +85,29 @@ List<Playlist> parsePlaylists(String htmlBody) {
   return rows
       .skip(1)
       .map((row) {
-        // Skip header row
         final cols = row.querySelectorAll('td');
-        if (cols.length < 3) return null;
+        if (cols.length < 3) {
+          debugPrint('Skipping row with insufficient columns: ${cols.length}');
+          return null;
+        }
 
-        final url = cols[0].querySelector('a')?.attributes['href'] ?? '';
+        final url =
+            cols[0].querySelector('a')?.attributes['href']?.trim() ?? '';
         final name = cols[1].querySelector('a')?.text.trim() ?? 'Unknown';
-        final songCount = int.tryParse(cols[2].text.trim()) ?? 0;
+        final songCountText = cols[2].text.trim().replaceAll(
+          RegExp(r'[^\d]'),
+          '',
+        );
+        final songCount = int.tryParse(songCountText) ?? 0;
+
+        debugPrint(
+          'Parsed playlist: name=$name, url=$url, songCount=$songCount',
+        );
+
+        if (url.isEmpty || name == 'Unknown') {
+          debugPrint('Invalid playlist data, skipping');
+          return null;
+        }
 
         return Playlist(name: name, url: url, songCount: songCount);
       })
@@ -213,75 +255,218 @@ Future<void> main() async {
 }
 
 class LoginScreen extends StatefulWidget {
-  final ValueChanged<WebViewController> onLoginSuccess;
-  const LoginScreen({super.key, required this.onLoginSuccess});
+  final void Function(WebViewController controller)? onLoginSuccess;
+
+  const LoginScreen({super.key, this.onLoginSuccess});
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  late WebViewController _controller;
-  bool _isLoading = true;
+  bool _isLoading = false;
+  WebViewController? _webViewController; // Add this line
+  List<Playlist> _playlists = []; // Add this line to define _playlists
 
-  @override
-  void initState() {
-    super.initState();
-    _controller =
-        WebViewController()
-          ..setJavaScriptMode(JavaScriptMode.unrestricted)
-          ..setNavigationDelegate(
-            NavigationDelegate(
-              onPageStarted: (url) {
-                debugPrint('Page started: $url');
-                setState(() {
-                  _isLoading = true;
-                });
-              },
-              onPageFinished: (url) async {
-                debugPrint('Page finished: $url');
-                setState(() {
-                  _isLoading = false;
-                });
-                // Check if login was successful
-                if (!url.contains('/logging') &&
-                    !url.contains('/forums/login')) {
-                  debugPrint('Login successful, passing WebViewController');
-                  widget.onLoginSuccess(_controller);
-                  Navigator.pop(context);
-                } else {
-                  debugPrint('Still on login page: $url');
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Please complete login.')),
-                  );
-                }
-              },
-              onWebResourceError: (error) {
-                debugPrint('WebView error: $error');
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      'Failed to load login page: ${error.description}',
-                    ),
-                  ),
-                );
-              },
-            ),
-          )
-          ..loadRequest(
-            Uri.parse('https://downloads.khinsider.com/forums/login'),
-          ); // Changed to match logs
+  Future<void> _performLogin() async {
+    setState(() => _isLoading = true);
+    final dio = Dio();
+    final cookieJar = CookieJar();
+    dio.interceptors.add(CookieManager(cookieJar));
+
+    try {
+      // Configure headers
+      dio.options.headers = {
+        'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept':
+            'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Origin': 'https://downloads.khinsider.com',
+        'Referer': 'https://downloads.khinsider.com/forums/login',
+        'DNT': '1',
+      };
+
+      // Step 1: GET login page to retrieve CSRF token and session cookies
+      debugPrint('Step 1: Getting CSRF token...');
+      const loginUrl = 'https://downloads.khinsider.com/forums/login';
+      final getResponse = await dio.get(loginUrl);
+
+      if (getResponse.statusCode != 200) {
+        debugPrint(
+          'Error getting login page: Status ${getResponse.statusCode}',
+        );
+        throw Exception('Failed to load login page: ${getResponse.statusCode}');
+      }
+
+      // Parse CSRF token (xfToken) from response body
+      final doc = html_parser.parse(getResponse.data);
+      final xfToken = doc.querySelector('input[name="_xfToken"]');
+      if (xfToken == null || xfToken.attributes['value'] == null) {
+        debugPrint('Error getting token: No _xfToken found');
+        throw Exception('Missing _xfToken from login page');
+      }
+
+      // Step 2: POST login with CSRF token
+      debugPrint('Step 2: Logging in...');
+      const postUrl =
+          'https://downloads.khinsider.com/forums/index.php?login/login';
+      dio.options.headers['Referer'] = loginUrl;
+      dio.options.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+
+      final loginData = {
+        '_xfToken': xfToken.attributes['value'],
+        'login': '',
+        'password': '',
+        'remember': '1',
+        '_xfRedirect': 'https://downloads.khinsider.com/playlist/browse',
+      };
+
+      final postResponse = await dio.post(
+        postUrl,
+        data: loginData,
+        options: Options(
+          followRedirects: false,
+          validateStatus:
+              (status) => status != null && status >= 200 && status < 400,
+        ),
+      );
+
+      if (postResponse.statusCode != 302 && postResponse.statusCode != 303) {
+        debugPrint(
+          '❌ Login failed — server returned ${postResponse.statusCode} instead of redirect',
+        );
+        debugPrint(postResponse.data.toString());
+        throw Exception(
+          'Login failed — did not redirect (status ${postResponse.statusCode})',
+        );
+      }
+
+      // Step 3: Follow redirect to playlist page
+      final location = postResponse.headers.value('location');
+      if (location == null) {
+        debugPrint('Error: No redirect location found');
+        throw Exception('No redirect location found');
+      }
+
+      final redirectUri =
+          location.startsWith('http')
+              ? Uri.parse(location)
+              : Uri.parse('https://downloads.khinsider.com$location');
+
+      debugPrint('Step 3: Loading playlist page...');
+      dio.options.headers['Referer'] =
+          'https://downloads.khinsider.com/playlist/browse';
+      final finalResponse = await dio.get(redirectUri.toString());
+
+      if (finalResponse.statusCode != 200) {
+        debugPrint(
+          'Error: Failed to load playlist: ${finalResponse.statusCode}',
+        );
+        throw Exception('Failed to load playlist: ${finalResponse.statusCode}');
+      }
+
+      // Verify login by checking for user menu
+      final finalDoc = html_parser.parse(finalResponse.data);
+      if (finalDoc.querySelector('a[href*="members"]') == null) {
+        debugPrint('Error: Login verification failed');
+        await PreferencesManager.clearCookies();
+        throw Exception('Login verification failed: User menu not found');
+      }
+
+      // Save cookies to PreferencesManager
+      final cookies = await cookieJar.loadForRequest(redirectUri);
+      final cookieMap = {for (var cookie in cookies) cookie.name: cookie.value};
+      if (!cookieMap.containsKey('xf_user') ||
+          !cookieMap.containsKey('xf_session')) {
+        debugPrint('Error: Missing xf_user or xf_session cookies');
+        await PreferencesManager.clearCookies();
+        throw Exception('Login failed: Missing required cookies');
+      }
+      await PreferencesManager.setCookies(cookieMap);
+
+      // Parse playlists directly to update state
+      final playlists = parsePlaylists(finalResponse.data);
+      if (playlists.isEmpty) {
+        debugPrint('Could not find playlist table');
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('No playlists found')));
+      } else {
+        debugPrint('Your Playlists:');
+        for (var playlist in playlists) {
+          debugPrint(
+            '- ${playlist.name} (${playlist.songCount} tracks) - https://downloads.khinsider.com${playlist.url}',
+          );
+        }
+      }
+
+      setState(() {
+        _playlists = playlists;
+      });
+
+      debugPrint('✅ Login successful, playlist loaded');
+    } catch (e) {
+      debugPrint('Login error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Login failed: $e')));
+      }
+    } finally {
+      dio.close();
+      setState(() => _isLoading = false);
+    }
+  }
+
+  /// Builds headers with persistent cookies
+  Map<String, String> _buildHeaders(
+    Map<String, String> cookieJar, {
+    bool isPost = false,
+  }) {
+    return {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
+      'Accept-Language': 'en-US,en;q=0.5',
+      if (isPost) 'Content-Type': 'application/x-www-form-urlencoded',
+      'Origin': 'https://downloads.khinsider.com',
+      'Referer': 'https://downloads.khinsider.com/forums/login',
+      if (cookieJar.isNotEmpty)
+        'Cookie': cookieJar.entries
+            .map((e) => '${e.key}=${e.value}')
+            .join('; '),
+    };
+  }
+
+  /// Updates cookie jar with new cookies
+  void _updateCookies(Map<String, String> jar, http.Response response) {
+    final raw = response.headers['set-cookie'];
+    if (raw == null) return;
+
+    final parts = raw.split(',');
+    for (var part in parts) {
+      final segments = part.split(';');
+      for (var segment in segments) {
+        final kv = segment.trim().split('=');
+        if (kv.length == 2 && kv[0].isNotEmpty) {
+          jar[kv[0]] = kv[1];
+        }
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Login to KHInsider')),
-      body: Stack(
-        children: [
-          WebViewWidget(controller: _controller),
-          if (_isLoading) const Center(child: CircularProgressIndicator()),
-        ],
+      body: Center(
+        child:
+            _isLoading
+                ? const CircularProgressIndicator()
+                : ElevatedButton(
+                  onPressed: _performLogin,
+                  child: const Text('Login'),
+                ),
       ),
     );
   }
@@ -929,7 +1114,8 @@ class _SearchScreenState extends State<SearchScreen>
 
   // New: Load playlists
   Future<void> _loadPlaylists() async {
-    if (_webViewController == null) {
+    if (!PreferencesManager.isLoggedIn()) {
+      debugPrint('User not logged in, navigating to login screen');
       await Navigator.push(
         context,
         MaterialPageRoute(
@@ -943,270 +1129,88 @@ class _SearchScreenState extends State<SearchScreen>
               ),
         ),
       );
-      if (_webViewController == null) {
+      if (!PreferencesManager.isLoggedIn()) {
         debugPrint('Login canceled or failed');
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Login canceled or failed.')),
+        );
         return;
       }
     }
 
-    final completer = Completer<void>();
-    String? finalUrl;
-
-    _webViewController!.setNavigationDelegate(
-      NavigationDelegate(
-        onPageStarted: (url) {
-          debugPrint('Playlist page started: $url');
-        },
-        onPageFinished: (url) {
-          debugPrint('Playlist page finished: $url');
-          finalUrl = url;
-          if (url == 'https://downloads.khinsider.com/playlist/browse') {
-            completer.complete();
-          } else {
-            completer.completeError('Redirected to $url');
-          }
-        },
-        onWebResourceError: (error) {
-          debugPrint('Playlist page error: ${error.description}');
-          completer.completeError('Failed to load page: ${error.description}');
-        },
-      ),
-    );
-
-    debugPrint('Loading playlist browse page');
-    await _webViewController!.loadRequest(
-      Uri.parse('https://downloads.khinsider.com/playlist/browse'),
-    );
-
     try {
-      await completer.future.timeout(const Duration(seconds: 10));
-    } catch (e) {
-      debugPrint('Error loading playlists: $e');
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed to load playlists: $e')));
-      return;
-    }
-
-    if (finalUrl != 'https://downloads.khinsider.com/playlist/browse') {
-      debugPrint('Unexpected redirect to $finalUrl');
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Session expired. Please log in again.')),
-      );
-      setState(() {
-        _webViewController = null;
-      });
-      return;
-    }
-
-    // Wait for JavaScript rendering
-    await Future.delayed(const Duration(seconds: 5));
-
-    // Check for login page
-    final hasLoginForm = await _webViewController!.runJavaScriptReturningResult(
-      'document.querySelector("form") !== null',
-    );
-    debugPrint('Has login form: $hasLoginForm');
-
-    // Extract full HTML
-    final fullHtml =
-        await _webViewController!.runJavaScriptReturningResult(
-              'document.documentElement.outerHTML',
-            )
-            as String;
-    debugPrint('Full page HTML length: ${fullHtml.length}');
-    debugPrint(
-      'Full page HTML snippet: ${fullHtml.substring(0, fullHtml.length.clamp(0, 500))}',
-    );
-
-    if (fullHtml.isNotEmpty) {
-      try {
-        final directory = await getApplicationDocumentsDirectory();
-        final file = File('${directory.path}/playlist_page.html');
-        await file.writeAsString(fullHtml);
-        debugPrint('Saved full HTML to ${file.path}');
-      } catch (e) {
-        debugPrint('Error saving HTML: $e');
-      }
-    }
-
-    // Check table
-    final tableExists = await _webViewController!.runJavaScriptReturningResult(
-      'document.getElementById("top40") !== null',
-    );
-    debugPrint('Table exists: $tableExists');
-
-    if (hasLoginForm.toString() == 'true' || tableExists.toString() != 'true') {
-      debugPrint('Playlist table not found or login page detected');
-      final altTableExists = await _webViewController!
-          .runJavaScriptReturningResult(
-            'document.querySelector("table") !== null',
-          );
-      debugPrint('Any table exists: $altTableExists');
-      if (altTableExists.toString() == 'true') {
-        final altTableHtml =
-            await _webViewController!.runJavaScriptReturningResult(
-                  'document.querySelector("table").innerHTML',
-                )
-                as String;
-        debugPrint('Alternative table HTML length: ${altTableHtml.length}');
-        debugPrint(
-          'Alternative table HTML snippet: ${altTableHtml.substring(0, altTableHtml.length.clamp(0, 500))}',
-        );
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No playlists found or session expired.')),
-      );
-      return;
-    }
-
-    // Extract table HTML
-    final tableHtml =
-        await _webViewController!.runJavaScriptReturningResult(
-              'document.getElementById("top40").innerHTML',
-            )
-            as String;
-    debugPrint('Extracted table HTML length: ${tableHtml.length}');
-    debugPrint(
-      'Table HTML snippet: ${tableHtml.substring(0, tableHtml.length.clamp(0, 500))}',
-    );
-
-    // Save table HTML
-    if (tableHtml.isNotEmpty) {
-      try {
-        final directory = await getApplicationDocumentsDirectory();
-        final file = File('${directory.path}/table_html.html');
-        await file.writeAsString(tableHtml);
-        debugPrint('Saved table HTML to ${file.path}');
-      } catch (e) {
-        debugPrint('Error saving table HTML: $e');
-      }
-    }
-
-    if (tableHtml.isEmpty) {
-      debugPrint('Empty table HTML');
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to extract playlist data.')),
-      );
-      return;
-    }
-
-    try {
-      // Decode HTML
-      final decodedHtml = HtmlUnescape().convert(tableHtml);
-      final document = html_parser.parse(decodedHtml);
-      final rows = document.querySelectorAll(
-        'tbody tr, tr',
-      ); // Try both tbody tr and tr
-      debugPrint('Found ${rows.length} table rows');
-
-      for (var row in rows) {
-        debugPrint(
-          'Row HTML: ${row.outerHtml.substring(0, row.outerHtml.length.clamp(0, 500))}',
-        );
-        final cols = row.querySelectorAll('td');
-        debugPrint('Row has ${cols.length} columns');
-        for (var i = 0; i < cols.length; i++) {
-          debugPrint(
-            'Column $i HTML: ${cols[i].outerHtml.substring(0, cols[i].outerHtml.length.clamp(0, 200))}',
-          );
-          debugPrint(
-            'Column $i text: ${cols[i].text.trim().substring(0, cols[i].text.length.clamp(0, 100))}',
-          );
-        }
-      }
-
-      final playlists =
-          rows
-              .skip(1)
-              .map((row) {
-                final cols = row.querySelectorAll('td');
-                debugPrint('Processing row with ${cols.length} columns');
-                if (cols.isEmpty) {
-                  debugPrint('Skipping empty row');
-                  return null;
-                }
-                // Flexible extraction
-                final url =
-                    cols[0].querySelector('a')?.attributes['href']?.trim() ??
-                    cols[0].querySelector('a')?.attributes['href']?.trim() ??
-                    '';
-                final name =
-                    cols.length > 1
-                        ? (cols[1].querySelector('a')?.text.trim() ??
-                            cols[1].text.trim())
-                        : 'Unknown';
-                final songCount =
-                    cols.length > 2
-                        ? int.tryParse(
-                              cols[2].text.trim().replaceAll(
-                                RegExp(r'[^\d]'),
-                                '',
-                              ),
-                            ) ??
-                            0
-                        : 0;
-                debugPrint(
-                  'Parsed playlist: name=$name, url=$url, songCount=$songCount',
-                );
-                if (url.isEmpty && name == 'Unknown') {
-                  debugPrint('Invalid playlist data, skipping');
-                  return null;
-                }
-                return Playlist(name: name, url: url, songCount: songCount);
-              })
-              .whereType<Playlist>()
-              .toList();
-
-      // Fallback parsing if no playlists
-      if (playlists.isEmpty) {
-        debugPrint('Attempting fallback parsing');
-        final fallbackPlaylists = <Playlist>[];
-        for (var row in rows.skip(1)) {
-          final cols = row.querySelectorAll('td');
-          if (cols.isEmpty) continue;
-          final text = cols.map((c) => c.text.trim()).join(' ').trim();
-          final urlMatch = RegExp(
-            r'/playlist/[^"\s]+',
-          ).firstMatch(row.outerHtml);
-          final url = urlMatch?.group(0) ?? '';
-          final name = text.isNotEmpty ? text : 'Unknown';
-          final songCountMatch = RegExp(
-            r'\d+',
-          ).firstMatch(cols.length > 2 ? cols[2].text : '');
-          final songCount =
-              songCountMatch != null ? int.parse(songCountMatch.group(0)!) : 0;
-          debugPrint(
-            'Fallback parsed: name=$name, url=$url, songCount=$songCount',
-          );
-          if (url.isNotEmpty) {
-            fallbackPlaylists.add(
-              Playlist(name: name, url: url, songCount: songCount),
-            );
-          }
-        }
-        if (fallbackPlaylists.isNotEmpty) {
-          debugPrint('Using fallback playlists');
-          playlists.addAll(fallbackPlaylists);
-        }
-      }
-
+      final playlists = await fetchPlaylists();
       setState(() {
         _playlists = playlists;
-        debugPrint('Loaded ${playlists.length} playlists');
       });
-
       if (playlists.isEmpty) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text('No playlists found.')));
       }
-    } catch (e, stackTrace) {
-      debugPrint('Error parsing playlists: $e');
-      debugPrint('Stack trace: $stackTrace');
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Error parsing playlists: $e')));
+    } catch (e) {
+      debugPrint('Error fetching playlists: $e');
+      // Fallback to WebView
+      if (_webViewController != null) {
+        try {
+          final currentUrl = await _webViewController!.currentUrl();
+          if (currentUrl != 'https://downloads.khinsider.com/playlist/browse') {
+            await _webViewController!.loadRequest(
+              Uri.parse('https://downloads.khinsider.com/playlist/browse'),
+            );
+            await Future.delayed(const Duration(seconds: 2));
+          }
+
+          final fullHtml =
+              await _webViewController!.runJavaScriptReturningResult(
+                    'document.documentElement.outerHTML',
+                  )
+                  as String;
+          debugPrint(
+            'WebView HTML (first 500 chars): ${fullHtml.substring(0, fullHtml.length.clamp(0, 500))}',
+          );
+
+          final directory = await getApplicationDocumentsDirectory();
+          final file = File('${directory.path}/playlist_page_webview.html');
+          await file.writeAsString(fullHtml);
+          debugPrint('Saved WebView HTML to ${file.path}');
+
+          final document = html_parser.parse(fullHtml);
+          final hasLoginForm = document.querySelector('form') != null;
+          if (hasLoginForm) {
+            debugPrint('Login page detected in WebView');
+            await PreferencesManager.clearCookies();
+            setState(() {
+              _webViewController = null;
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Session expired. Please log in again.'),
+              ),
+            );
+            return;
+          }
+
+          final playlists = parsePlaylists(fullHtml);
+          setState(() {
+            _playlists = playlists;
+          });
+          if (playlists.isEmpty) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('No playlists found.')),
+            );
+          }
+        } catch (e) {
+          debugPrint('WebView error: $e');
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error fetching playlists: $e')),
+          );
+        }
+      } else {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error fetching playlists: $e')));
+      }
     }
   }
 
