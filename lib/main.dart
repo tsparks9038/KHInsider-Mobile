@@ -1920,6 +1920,104 @@ class _SearchScreenState extends State<SearchScreen>
     );
   }
 
+  Future<void> _createPlaylist() async {
+    if (!PreferencesManager.isLoggedIn()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please log in to create a playlist')),
+      );
+      return;
+    }
+
+    final TextEditingController nameController = TextEditingController();
+    final result = await showDialog<String>(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: const Text('New Playlist'),
+            content: TextField(
+              controller: nameController,
+              decoration: const InputDecoration(
+                labelText: 'Playlist Name',
+                border: OutlineInputBorder(),
+              ),
+              maxLength: 50,
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () {
+                  final name = nameController.text.trim();
+                  if (name.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Playlist name cannot be empty'),
+                      ),
+                    );
+                    return;
+                  }
+                  Navigator.pop(context, name);
+                },
+                child: const Text('Create'),
+              ),
+            ],
+          ),
+    );
+
+    if (result == null || result.isEmpty) return;
+
+    setState(() => _isLoginLoading = true);
+    final cookies = PreferencesManager.getCookies();
+    final cookieString = cookies.entries
+        .map((e) => '${e.key}=${e.value}')
+        .join('; ');
+    final client = http.Client();
+
+    try {
+      final url = Uri.parse(
+        'https://downloads.khinsider.com/playlist/add?name=${Uri.encodeQueryComponent(result)}',
+      );
+      final response = await client
+          .get(
+            url,
+            headers: {
+              'Cookie': cookieString,
+              'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+              'Accept':
+                  'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Encoding': 'gzip, deflate, br',
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+          )
+          .timeout(const Duration(seconds: 10));
+
+      debugPrint('Create playlist status: ${response.statusCode}');
+      final document = html_parser.parse(response.body);
+      final title = document.querySelector('title')?.text.trim();
+      debugPrint('Create playlist page title: $title');
+
+      if (response.statusCode != 200 || title == 'Please Log In') {
+        throw Exception('Session expired or failed to create playlist');
+      }
+
+      await _loadPlaylists(); // Refresh playlists
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Playlist "$result" created')));
+    } catch (e) {
+      debugPrint('Error creating playlist: $e');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to create playlist: $e')));
+    } finally {
+      setState(() => _isLoginLoading = false);
+      client.close();
+    }
+  }
+
   Widget _buildFavoritesList() {
     if (!PreferencesManager.isLoggedIn() && !_isLoginLoading) {
       return Center(
@@ -2037,7 +2135,19 @@ class _SearchScreenState extends State<SearchScreen>
                 'Playlists',
                 style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
               ),
-              IconButton(icon: const Icon(Icons.logout), onPressed: _logout),
+              Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.add),
+                    tooltip: 'New Playlist',
+                    onPressed: _createPlaylist,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.logout),
+                    onPressed: _logout,
+                  ),
+                ],
+              ),
             ],
           ),
         ),
