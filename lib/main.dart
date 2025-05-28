@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:html/dom.dart' as html_parser;
 import 'package:http/http.dart' as http;
 import 'package:html/parser.dart' as html_parser;
 import 'package:flutter/foundation.dart';
@@ -570,83 +571,6 @@ class _SearchScreenState extends State<SearchScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused) {
       _savePlaybackState();
-    }
-  }
-
-  Future<void> _fetchAlbumSongs(String albumUrl) async {
-    final client = http.Client();
-    try {
-      final response = await client
-          .get(Uri.parse(albumUrl))
-          .timeout(const Duration(seconds: 60));
-      if (response.statusCode != 200) {
-        throw Exception('Failed to fetch: ${response.statusCode}');
-      }
-
-      final document = html_parser.parse(response.body);
-      final songRows = document.querySelectorAll('tr');
-      final songs = <Map<String, dynamic>>[];
-
-      for (final row in songRows) {
-        final titleCell = row.querySelector('.clickable-row a');
-        final title = titleCell?.text.trim();
-        final songUrl = titleCell?.attributes['href'];
-        if (title == null || title == '' || songUrl == null) continue;
-
-        final runtimeCell = row.querySelector('td:nth-child(4)')?.text.trim();
-        final addToPlaylistCell = row.querySelector(
-          '.playlistAddCell .playlistAddTo',
-        );
-        final songId = addToPlaylistCell?.attributes['songid'];
-
-        debugPrint(
-          'Found song: title=$title, url=$songUrl, runtime=$runtimeCell, id=$songId',
-        );
-
-        if (songId == null) continue;
-
-        final absoluteSongUrl =
-            songUrl!.startsWith('http')
-                ? songUrl
-                : 'https://downloads.khinsider.com$songUrl';
-        final audioSource = ProgressiveAudioSource(
-          Uri.parse(absoluteSongUrl),
-          tag: MediaItem(
-            id: absoluteSongUrl,
-            title: title,
-            album: _selectedAlbum?['albumName'],
-          ),
-        );
-
-        songs.add({
-          'songPageUrl': absoluteSongUrl,
-          'audioSource': audioSource,
-          'runtime': runtimeCell,
-          'songId': songId,
-        });
-      }
-
-      final directory = await getApplicationDocumentsDirectory();
-      final file = File('${directory.path}/album_page.html');
-      await file.writeAsString(response.body);
-      debugPrint('Saved album HTML to ${file.path}');
-
-      setState(() {
-        _songs = songs;
-        _playlist = ConcatenatingAudioSource(
-          children:
-              songs
-                  .map((s) => s['audioSource'] as ProgressiveAudioSource)
-                  .toList(),
-        );
-      });
-    } catch (e) {
-      debugPrint('Error fetching album songs: $e');
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed to load songs: $e')));
-    } finally {
-      client.close();
     }
   }
 
@@ -1963,6 +1887,7 @@ class _SearchScreenState extends State<SearchScreen>
           final song = entry.value;
           final audioSource = song['audioSource'] as ProgressiveAudioSource;
           final mediaItem = audioSource.tag as MediaItem;
+          final songId = song['songId'] as String?;
           return ListTile(
             title: Text(
               audioSource.tag.title ?? 'Unknown',
@@ -1974,14 +1899,22 @@ class _SearchScreenState extends State<SearchScreen>
               children: [
                 IconButton(
                   icon: const Icon(Icons.playlist_add),
-                  tooltip: 'Add to Playlist',
+                  tooltip:
+                      songId != null
+                          ? 'Add to Playlist'
+                          : 'Playlist ID unavailable',
                   onPressed:
-                      PreferencesManager.isLoggedIn()
-                          ? () => _showAddToPlaylistDialog(song)
+                      songId != null && PreferencesManager.isLoggedIn()
+                          ? () {
+                            debugPrint(
+                              'Opening playlist dialog for song: $song',
+                            );
+                            _showAddToPlaylistDialog(song);
+                          }
                           : () => ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
                               content: Text(
-                                'Please log in to add to playlists',
+                                'Please log in or song ID unavailable',
                               ),
                             ),
                           ),
@@ -2002,22 +1935,19 @@ class _SearchScreenState extends State<SearchScreen>
     );
   }
 
-  String? _getSongId(String songPageUrl) {
-    final uri = Uri.parse(songPageUrl);
-    final segments = uri.pathSegments;
-    final lastSegment = segments.lastOrNull;
-    if (lastSegment == null) return null;
-    final match = RegExp(r'^(\d+)\.mp3$').firstMatch(lastSegment);
-    return match?.group(1);
-  }
-
   Future<List<Map<String, dynamic>>> _fetchPlaylistPopup(String songId) async {
-    final cookies = PreferencesManager.getCookies();
-    final cookieString = cookies.entries
-        .map((e) => '${e.key}=${e.value}')
-        .join('; ');
     final client = http.Client();
     try {
+      final cookies = await PreferencesManager.getCookies();
+      if (cookies.isEmpty) {
+        debugPrint('Error: No cookies found in PreferencesManager');
+        throw Exception('No authentication cookies available');
+      }
+      final cookieString = cookies.entries
+          .map((entry) => "${entry.key}=${entry.value}")
+          .join('; ');
+      debugPrint('Sending cookies: $cookieString');
+
       final response = await client
           .get(
             Uri.parse(
@@ -2026,53 +1956,69 @@ class _SearchScreenState extends State<SearchScreen>
             headers: {
               'Cookie': cookieString,
               'User-Agent':
-                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
-              'Accept':
-                  'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-              'Accept-Encoding': 'gzip, deflate, br',
-              'Accept-Language': 'en-US,en;q=0.9',
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             },
           )
           .timeout(const Duration(seconds: 10));
 
-      debugPrint('Playlist popup status: ${response.statusCode}');
-      if (response.statusCode != 200) {
-        throw Exception(
-          'Failed to load playlist popup: ${response.statusCode}',
-        );
-      }
+      // Debug: Print raw response (check for errors or unexpected HTML)
+      debugPrint('Raw HTML: ${response.body}');
 
       final document = html_parser.parse(response.body);
-      final title = document.querySelector('title')?.text.trim();
-      debugPrint('Playlist popup title: $title');
-      if (title == 'Please Log In') {
-        throw Exception('Session expired, login required');
+
+      // Try BOTH selectors to see which one works
+      var playlistLabels = document.querySelectorAll(
+        'label.playlistPopupLabel',
+      );
+      if (playlistLabels.isEmpty) {
+        debugPrint(
+          'Warning: No labels found with selector "label.playlistPopupLabel"',
+        );
+        playlistLabels = document.querySelectorAll('label[playlistid]');
       }
 
-      final labels = document.querySelectorAll('label.playlistPopupLabel');
-      final playlists =
-          labels
-              .map((label) {
-                final playlistId = label.attributes['playlistid'];
-                final name = label.text.trim();
-                final checkbox = label.querySelector(
-                  'input.playlistPopupCheckbox',
-                );
-                final isChecked =
-                    checkbox?.attributes.containsKey('checked') ?? false;
-                return playlistId != null
-                    ? {'id': playlistId, 'name': name, 'isChecked': isChecked}
-                    : null;
-              })
-              .whereType<Map<String, dynamic>>()
-              .toList();
+      debugPrint('Found ${playlistLabels.length} labels');
+      final playlists = <Map<String, dynamic>>[];
+      for (final label in playlistLabels) {
+        final checkbox = label.querySelector('input[type="checkbox"]');
+        final playlistId = label.attributes['playlistid'];
 
-      final directory = await getApplicationDocumentsDirectory();
-      final file = File('${directory.path}/playlist_popup.html');
-      await file.writeAsString(response.body);
-      debugPrint('Saved playlist popup HTML to ${file.path}');
+        // Extract name
+        String name = '';
+        for (var node in label.nodes) {
+          if (node is html_parser.Text && node.text.trim().isNotEmpty) {
+            name = node.text.trim();
+            break;
+          }
+        }
 
+        // Robust checked detection
+        bool isChecked;
+        if (checkbox?.attributes == null) {
+          // Fallback to HTML string check
+          isChecked = label.innerHtml.contains(' checked');
+        } else {
+          // Normal attribute check
+          isChecked = checkbox?.attributes.containsKey('checked') ?? false;
+        }
+
+        if (playlistId != null && name.isNotEmpty) {
+          playlists.add({
+            'id': playlistId,
+            'name': name,
+            'isChecked': isChecked,
+          });
+          debugPrint(
+            'Parsed playlist: id=$playlistId, name=$name, isChecked=$isChecked',
+          );
+        }
+      }
+
+      debugPrint('Parsed ${playlists.length} playlists');
       return playlists;
+    } catch (e) {
+      debugPrint('Error fetching playlist popup: $e');
+      rethrow;
     } finally {
       client.close();
     }
@@ -2121,33 +2067,26 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   Future<void> _showAddToPlaylistDialog(Map<String, dynamic> song) async {
-    String? songId = song['songId'] as String?;
-    // If songId is missing, try to fetch it using the songPageUrl
-    if (songId == null && song['songPageUrl'] != null) {
-      try {
-        final songData = await _parseSongPage(song['songPageUrl']);
-        songId = _getSongId(songData['songPageUrl'] ?? '');
-      } catch (e) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Song ID not available')));
-        return;
-      }
-    }
-
+    final songId = song['songId'] as String?;
     if (songId == null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Song ID not available')));
+      debugPrint('Invalid songId: $songId for song: ${song['songPageUrl']}');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Cannot add song: Invalid or missing playlist ID'),
+        ),
+      );
       return;
     }
+    debugPrint('Fetching playlists for songId: $songId');
 
     setState(() => _isLoginLoading = true);
     List<Map<String, dynamic>> playlists;
     try {
       playlists = await _fetchPlaylistPopup(songId);
+      debugPrint('Received playlists: $playlists');
     } catch (e) {
       setState(() => _isLoginLoading = false);
+      debugPrint('Failed to load playlists: $e');
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Failed to load playlists: $e')));
@@ -2156,6 +2095,7 @@ class _SearchScreenState extends State<SearchScreen>
     setState(() => _isLoginLoading = false);
 
     if (playlists.isEmpty) {
+      debugPrint('No playlists available for songId: $songId');
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('No playlists available')));
@@ -2189,7 +2129,7 @@ class _SearchScreenState extends State<SearchScreen>
                                 setState(() => _isLoginLoading = true);
                                 try {
                                   await _togglePlaylistMembership(
-                                    songId!,
+                                    songId,
                                     playlistId,
                                   );
                                   setDialogState(() {
@@ -3105,14 +3045,30 @@ Future<List<Map<String, dynamic>>> parseSongList(
   for (var i = 0; i < rows.length; i++) {
     final row = rows[i];
     final links = row.querySelectorAll('a');
-    if (links.length < 2) continue;
+    if (links.length < 2) {
+      debugPrint('Skipping row $i: insufficient links');
+      continue;
+    }
 
     final name = links[0].text.trim();
     final runtime = links[1].text.trim();
     final href = links[0].attributes['href'];
-    if (href == null || name.isEmpty || runtime.isEmpty) continue;
+    if (href == null || name.isEmpty || runtime.isEmpty) {
+      debugPrint('Skipping row $i: missing href, name, or runtime');
+      continue;
+    }
 
     final detailUrl = 'https://downloads.khinsider.com$href';
+    final addToPlaylistCell = row.querySelector(
+      '.playlistAddCell .playlistAddTo',
+    );
+    final songId = addToPlaylistCell?.attributes['songid'];
+
+    if (songId == null) {
+      debugPrint('Warning: No songid for song "$name" at $detailUrl');
+    } else {
+      debugPrint('Extracted songid: $songId for song "$name"');
+    }
 
     futures.add(
       pool.withResource(
@@ -3137,6 +3093,7 @@ Future<List<Map<String, dynamic>>> parseSongList(
                 'albumUrl': albumUrl,
                 'index': i,
                 'songPageUrl': detailUrl,
+                'songId': songId, // Add songId
               };
             })
             .catchError((e) {
@@ -3149,6 +3106,12 @@ Future<List<Map<String, dynamic>>> parseSongList(
 
   final results = await Future.wait(futures);
   songs.addAll(results.whereType<Map<String, dynamic>>());
+
+  if (songs.isEmpty) {
+    debugPrint('No songs parsed from album HTML');
+  } else {
+    debugPrint('Parsed ${songs.length} songs');
+  }
 
   return songs;
 }
