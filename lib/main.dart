@@ -573,6 +573,83 @@ class _SearchScreenState extends State<SearchScreen>
     }
   }
 
+  Future<void> _fetchAlbumSongs(String albumUrl) async {
+    final client = http.Client();
+    try {
+      final response = await client
+          .get(Uri.parse(albumUrl))
+          .timeout(const Duration(seconds: 60));
+      if (response.statusCode != 200) {
+        throw Exception('Failed to fetch: ${response.statusCode}');
+      }
+
+      final document = html_parser.parse(response.body);
+      final songRows = document.querySelectorAll('tr');
+      final songs = <Map<String, dynamic>>[];
+
+      for (final row in songRows) {
+        final titleCell = row.querySelector('.clickable-row a');
+        final title = titleCell?.text.trim();
+        final songUrl = titleCell?.attributes['href'];
+        if (title == null || title == '' || songUrl == null) continue;
+
+        final runtimeCell = row.querySelector('td:nth-child(4)')?.text.trim();
+        final addToPlaylistCell = row.querySelector(
+          '.playlistAddCell .playlistAddTo',
+        );
+        final songId = addToPlaylistCell?.attributes['songid'];
+
+        debugPrint(
+          'Found song: title=$title, url=$songUrl, runtime=$runtimeCell, id=$songId',
+        );
+
+        if (songId == null) continue;
+
+        final absoluteSongUrl =
+            songUrl!.startsWith('http')
+                ? songUrl
+                : 'https://downloads.khinsider.com$songUrl';
+        final audioSource = ProgressiveAudioSource(
+          Uri.parse(absoluteSongUrl),
+          tag: MediaItem(
+            id: absoluteSongUrl,
+            title: title,
+            album: _selectedAlbum?['albumName'],
+          ),
+        );
+
+        songs.add({
+          'songPageUrl': absoluteSongUrl,
+          'audioSource': audioSource,
+          'runtime': runtimeCell,
+          'songId': songId,
+        });
+      }
+
+      final directory = await getApplicationDocumentsDirectory();
+      final file = File('${directory.path}/album_page.html');
+      await file.writeAsString(response.body);
+      debugPrint('Saved album HTML to ${file.path}');
+
+      setState(() {
+        _songs = songs;
+        _playlist = ConcatenatingAudioSource(
+          children:
+              songs
+                  .map((s) => s['audioSource'] as ProgressiveAudioSource)
+                  .toList(),
+        );
+      });
+    } catch (e) {
+      debugPrint('Error fetching album songs: $e');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to load songs: $e')));
+    } finally {
+      client.close();
+    }
+  }
+
   Future<void> _performLogin() async {
     if (_emailController.text.isEmpty || _passwordController.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1896,13 +1973,18 @@ class _SearchScreenState extends State<SearchScreen>
               mainAxisSize: MainAxisSize.min,
               children: [
                 IconButton(
-                  icon: Icon(
-                    _isFavorited(mediaItem)
-                        ? Icons.favorite
-                        : Icons.favorite_border,
-                    color: _isFavorited(mediaItem) ? Colors.red : null,
-                  ),
-                  onPressed: () => _toggleFavorite(song),
+                  icon: const Icon(Icons.playlist_add),
+                  tooltip: 'Add to Playlist',
+                  onPressed:
+                      PreferencesManager.isLoggedIn()
+                          ? () => _showAddToPlaylistDialog(song)
+                          : () => ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Please log in to add to playlists',
+                              ),
+                            ),
+                          ),
                 ),
                 IconButton(
                   icon: const Icon(Icons.share),
@@ -1917,6 +1999,226 @@ class _SearchScreenState extends State<SearchScreen>
         }),
         if (_songState.value.url != null) const SizedBox(height: 70),
       ],
+    );
+  }
+
+  String? _getSongId(String songPageUrl) {
+    final uri = Uri.parse(songPageUrl);
+    final segments = uri.pathSegments;
+    final lastSegment = segments.lastOrNull;
+    if (lastSegment == null) return null;
+    final match = RegExp(r'^(\d+)\.mp3$').firstMatch(lastSegment);
+    return match?.group(1);
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchPlaylistPopup(String songId) async {
+    final cookies = PreferencesManager.getCookies();
+    final cookieString = cookies.entries
+        .map((e) => '${e.key}=${e.value}')
+        .join('; ');
+    final client = http.Client();
+    try {
+      final response = await client
+          .get(
+            Uri.parse(
+              'https://downloads.khinsider.com/playlist/popup_list?songid=$songId',
+            ),
+            headers: {
+              'Cookie': cookieString,
+              'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+              'Accept':
+                  'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Encoding': 'gzip, deflate, br',
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+          )
+          .timeout(const Duration(seconds: 10));
+
+      debugPrint('Playlist popup status: ${response.statusCode}');
+      if (response.statusCode != 200) {
+        throw Exception(
+          'Failed to load playlist popup: ${response.statusCode}',
+        );
+      }
+
+      final document = html_parser.parse(response.body);
+      final title = document.querySelector('title')?.text.trim();
+      debugPrint('Playlist popup title: $title');
+      if (title == 'Please Log In') {
+        throw Exception('Session expired, login required');
+      }
+
+      final labels = document.querySelectorAll('label.playlistPopupLabel');
+      final playlists =
+          labels
+              .map((label) {
+                final playlistId = label.attributes['playlistid'];
+                final name = label.text.trim();
+                final checkbox = label.querySelector(
+                  'input.playlistPopupCheckbox',
+                );
+                final isChecked =
+                    checkbox?.attributes.containsKey('checked') ?? false;
+                return playlistId != null
+                    ? {'id': playlistId, 'name': name, 'isChecked': isChecked}
+                    : null;
+              })
+              .whereType<Map<String, dynamic>>()
+              .toList();
+
+      final directory = await getApplicationDocumentsDirectory();
+      final file = File('${directory.path}/playlist_popup.html');
+      await file.writeAsString(response.body);
+      debugPrint('Saved playlist popup HTML to ${file.path}');
+
+      return playlists;
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<void> _togglePlaylistMembership(
+    String songId,
+    String playlistId,
+  ) async {
+    final cookies = PreferencesManager.getCookies();
+    final cookieString = cookies.entries
+        .map((e) => '${e.key}=${e.value}')
+        .join('; ');
+    final client = http.Client();
+    try {
+      final response = await client
+          .get(
+            Uri.parse(
+              'https://downloads.khinsider.com/playlist/popup_toggle?songid=$songId&playlistid=$playlistId',
+            ),
+            headers: {
+              'Cookie': cookieString,
+              'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+              'Accept':
+                  'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Encoding': 'gzip, deflate, br',
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+          )
+          .timeout(const Duration(seconds: 10));
+
+      debugPrint('Toggle playlist status: ${response.statusCode}');
+      if (response.statusCode != 200) {
+        throw Exception('Failed to toggle playlist: ${response.statusCode}');
+      }
+
+      final document = html_parser.parse(response.body);
+      final title = document.querySelector('title')?.text.trim();
+      if (title == 'Please Log In') {
+        throw Exception('Session expired, login required');
+      }
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<void> _showAddToPlaylistDialog(Map<String, dynamic> song) async {
+    String? songId = song['songId'] as String?;
+    // If songId is missing, try to fetch it using the songPageUrl
+    if (songId == null && song['songPageUrl'] != null) {
+      try {
+        final songData = await _parseSongPage(song['songPageUrl']);
+        songId = _getSongId(songData['songPageUrl'] ?? '');
+      } catch (e) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Song ID not available')));
+        return;
+      }
+    }
+
+    if (songId == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Song ID not available')));
+      return;
+    }
+
+    setState(() => _isLoginLoading = true);
+    List<Map<String, dynamic>> playlists;
+    try {
+      playlists = await _fetchPlaylistPopup(songId);
+    } catch (e) {
+      setState(() => _isLoginLoading = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to load playlists: $e')));
+      return;
+    }
+    setState(() => _isLoginLoading = false);
+
+    if (playlists.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('No playlists available')));
+      return;
+    }
+
+    final checkboxStates = Map<String, bool>.fromEntries(
+      playlists.map((p) => MapEntry(p['id'] as String, p['isChecked'] as bool)),
+    );
+
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder:
+          (context) => StatefulBuilder(
+            builder:
+                (context, setDialogState) => AlertDialog(
+                  title: const Text('Add to Playlists'),
+                  content: SizedBox(
+                    width: double.maxFinite,
+                    child: ListView(
+                      shrinkWrap: true,
+                      children:
+                          playlists.map((playlist) {
+                            final playlistId = playlist['id'] as String;
+                            return CheckboxListTile(
+                              title: Text(playlist['name'] as String),
+                              value: checkboxStates[playlistId] ?? false,
+                              onChanged: (value) async {
+                                if (value == null) return;
+                                setState(() => _isLoginLoading = true);
+                                try {
+                                  await _togglePlaylistMembership(
+                                    songId!,
+                                    playlistId,
+                                  );
+                                  setDialogState(() {
+                                    checkboxStates[playlistId] = value;
+                                  });
+                                } catch (e) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        'Failed to update playlist: $e',
+                                      ),
+                                    ),
+                                  );
+                                } finally {
+                                  setState(() => _isLoginLoading = false);
+                                }
+                              },
+                            );
+                          }).toList(),
+                    ),
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('Close'),
+                    ),
+                  ],
+                ),
+          ),
     );
   }
 
