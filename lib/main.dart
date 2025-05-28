@@ -15,9 +15,6 @@ import 'package:file_picker/file_picker.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:app_links/app_links.dart';
 import 'package:webview_flutter/webview_flutter.dart';
-import 'package:html_unescape/html_unescape.dart';
-import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
-import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 import 'package:dio/dio.dart';
 import 'package:cookie_jar/cookie_jar.dart';
@@ -32,6 +29,7 @@ class Playlist {
 
 Future<List<Playlist>> fetchPlaylists() async {
   final cookies = PreferencesManager.getCookies();
+  debugPrint('Fetching playlists with cookies: $cookies');
   if (!PreferencesManager.isLoggedIn()) {
     throw Exception('User not logged in');
   }
@@ -41,18 +39,25 @@ Future<List<Playlist>> fetchPlaylists() async {
       .join('; ');
   final client = http.Client();
   try {
-    final response = await client.get(
-      Uri.parse('https://downloads.khinsider.com/playlist/browse'),
-      headers: {
-        'Cookie': cookieString,
-        'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
-        'Accept':
-            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-    );
+    final response = await client
+        .get(
+          Uri.parse('https://downloads.khinsider.com/playlist/browse'),
+          headers: {
+            'Cookie': cookieString,
+            'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+            'Accept':
+                'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+        )
+        .timeout(
+          const Duration(seconds: 10),
+          onTimeout: () {
+            throw TimeoutException('Request to load playlists timed out');
+          },
+        );
 
     debugPrint('Playlist GET status: ${response.statusCode}');
     if (response.statusCode != 200) {
@@ -60,13 +65,12 @@ Future<List<Playlist>> fetchPlaylists() async {
     }
 
     final document = html_parser.parse(response.body);
-    final hasLoginForm = document.querySelector('form') != null;
-    if (hasLoginForm) {
-      await PreferencesManager.clearCookies();
+    final title = document.querySelector('title')?.text.trim();
+    debugPrint('Page title: $title');
+    if (title == 'Please Log In') {
       throw Exception('Session expired, login required');
     }
 
-    // Save HTML for debugging
     final directory = await getApplicationDocumentsDirectory();
     final file = File('${directory.path}/playlist_page.html');
     await file.writeAsString(response.body);
@@ -121,6 +125,9 @@ class PreferencesManager {
 
   static Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
+    debugPrint(
+      'PreferencesManager initialized with keys: ${_prefs!.getKeys()}',
+    );
   }
 
   static Future<bool> setBool(String key, bool value) async {
@@ -138,21 +145,27 @@ class PreferencesManager {
   static bool? getBool(String key) => _prefs!.getBool(key);
   static String? getString(String key) => _prefs!.getString(key);
 
-  // New: Store cookies
-  static Future<void> setCookies(Map<String, String> cookies) async {
+  static Future<bool> setCookies(Map<String, String> cookies) async {
+    if (_prefs == null) {
+      await init();
+    }
     for (var entry in cookies.entries) {
       await _prefs!.setString('cookie_${entry.key}', entry.value);
     }
     await _backupPreferences();
+    return true;
   }
 
-  // New: Retrieve cookies
   static Map<String, String> getCookies() {
+    if (_prefs == null) {
+      debugPrint('Warning: _prefs not initialized in getCookies');
+      return {};
+    }
     final cookies = <String, String>{};
     final keys = _prefs!.getKeys();
     for (var key in keys) {
       if (key.startsWith('cookie_')) {
-        final cookieName = key.substring(7); // Remove 'cookie_' prefix
+        final cookieName = key.substring(7);
         final value = _prefs!.getString(key);
         if (value != null) {
           cookies[cookieName] = value;
@@ -250,7 +263,8 @@ Future<void> main() async {
     androidNotificationChannelName: 'Audio playback',
     androidNotificationOngoing: true,
   );
-  await PreferencesManager.init();
+  await PreferencesManager.init(); // Ensure this completes
+  debugPrint('SharedPreferences initialized');
   runApp(const SearchApp());
 }
 
@@ -264,209 +278,53 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  bool _isLoading = false;
-  WebViewController? _webViewController; // Add this line
-  List<Playlist> _playlists = []; // Add this line to define _playlists
+  bool _isLoginLoading = false;
+  WebViewController? _webViewController;
+  List<Playlist> _playlists = [];
+  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
 
-  Future<void> _performLogin() async {
-    setState(() => _isLoading = true);
-    final dio = Dio();
-    final cookieJar = CookieJar();
-    dio.interceptors.add(CookieManager(cookieJar));
-
-    try {
-      // Configure headers
-      dio.options.headers = {
-        'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept':
-            'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Origin': 'https://downloads.khinsider.com',
-        'Referer': 'https://downloads.khinsider.com/forums/login',
-        'DNT': '1',
-      };
-
-      // Step 1: GET login page to retrieve CSRF token and session cookies
-      debugPrint('Step 1: Getting CSRF token...');
-      const loginUrl = 'https://downloads.khinsider.com/forums/login';
-      final getResponse = await dio.get(loginUrl);
-
-      if (getResponse.statusCode != 200) {
-        debugPrint(
-          'Error getting login page: Status ${getResponse.statusCode}',
-        );
-        throw Exception('Failed to load login page: ${getResponse.statusCode}');
-      }
-
-      // Parse CSRF token (xfToken) from response body
-      final doc = html_parser.parse(getResponse.data);
-      final xfToken = doc.querySelector('input[name="_xfToken"]');
-      if (xfToken == null || xfToken.attributes['value'] == null) {
-        debugPrint('Error getting token: No _xfToken found');
-        throw Exception('Missing _xfToken from login page');
-      }
-
-      // Step 2: POST login with CSRF token
-      debugPrint('Step 2: Logging in...');
-      const postUrl =
-          'https://downloads.khinsider.com/forums/index.php?login/login';
-      dio.options.headers['Referer'] = loginUrl;
-      dio.options.headers['Content-Type'] = 'application/x-www-form-urlencoded';
-
-      final loginData = {
-        '_xfToken': xfToken.attributes['value'],
-        'login': '',
-        'password': '',
-        'remember': '1',
-        '_xfRedirect': 'https://downloads.khinsider.com/playlist/browse',
-      };
-
-      final postResponse = await dio.post(
-        postUrl,
-        data: loginData,
-        options: Options(
-          followRedirects: false,
-          validateStatus:
-              (status) => status != null && status >= 200 && status < 400,
-        ),
-      );
-
-      if (postResponse.statusCode != 302 && postResponse.statusCode != 303) {
-        debugPrint(
-          '❌ Login failed — server returned ${postResponse.statusCode} instead of redirect',
-        );
-        debugPrint(postResponse.data.toString());
-        throw Exception(
-          'Login failed — did not redirect (status ${postResponse.statusCode})',
-        );
-      }
-
-      // Step 3: Follow redirect to playlist page
-      final location = postResponse.headers.value('location');
-      if (location == null) {
-        debugPrint('Error: No redirect location found');
-        throw Exception('No redirect location found');
-      }
-
-      final redirectUri =
-          location.startsWith('http')
-              ? Uri.parse(location)
-              : Uri.parse('https://downloads.khinsider.com$location');
-
-      debugPrint('Step 3: Loading playlist page...');
-      dio.options.headers['Referer'] =
-          'https://downloads.khinsider.com/playlist/browse';
-      final finalResponse = await dio.get(redirectUri.toString());
-
-      if (finalResponse.statusCode != 200) {
-        debugPrint(
-          'Error: Failed to load playlist: ${finalResponse.statusCode}',
-        );
-        throw Exception('Failed to load playlist: ${finalResponse.statusCode}');
-      }
-
-      // Verify login by checking for user menu
-      final finalDoc = html_parser.parse(finalResponse.data);
-      if (finalDoc.querySelector('a[href*="members"]') == null) {
-        debugPrint('Error: Login verification failed');
-        await PreferencesManager.clearCookies();
-        throw Exception('Login verification failed: User menu not found');
-      }
-
-      // Save cookies to PreferencesManager
-      final cookies = await cookieJar.loadForRequest(redirectUri);
-      final cookieMap = {for (var cookie in cookies) cookie.name: cookie.value};
-      if (!cookieMap.containsKey('xf_user') ||
-          !cookieMap.containsKey('xf_session')) {
-        debugPrint('Error: Missing xf_user or xf_session cookies');
-        await PreferencesManager.clearCookies();
-        throw Exception('Login failed: Missing required cookies');
-      }
-      await PreferencesManager.setCookies(cookieMap);
-
-      // Parse playlists directly to update state
-      final playlists = parsePlaylists(finalResponse.data);
-      if (playlists.isEmpty) {
-        debugPrint('Could not find playlist table');
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('No playlists found')));
-      } else {
-        debugPrint('Your Playlists:');
-        for (var playlist in playlists) {
-          debugPrint(
-            '- ${playlist.name} (${playlist.songCount} tracks) - https://downloads.khinsider.com${playlist.url}',
-          );
-        }
-      }
-
-      setState(() {
-        _playlists = playlists;
-      });
-
-      debugPrint('✅ Login successful, playlist loaded');
-    } catch (e) {
-      debugPrint('Login error: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Login failed: $e')));
-      }
-    } finally {
-      dio.close();
-      setState(() => _isLoading = false);
-    }
-  }
-
-  /// Builds headers with persistent cookies
-  Map<String, String> _buildHeaders(
-    Map<String, String> cookieJar, {
-    bool isPost = false,
-  }) {
-    return {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
-      'Accept-Language': 'en-US,en;q=0.5',
-      if (isPost) 'Content-Type': 'application/x-www-form-urlencoded',
-      'Origin': 'https://downloads.khinsider.com',
-      'Referer': 'https://downloads.khinsider.com/forums/login',
-      if (cookieJar.isNotEmpty)
-        'Cookie': cookieJar.entries
-            .map((e) => '${e.key}=${e.value}')
-            .join('; '),
-    };
-  }
-
-  /// Updates cookie jar with new cookies
-  void _updateCookies(Map<String, String> jar, http.Response response) {
-    final raw = response.headers['set-cookie'];
-    if (raw == null) return;
-
-    final parts = raw.split(',');
-    for (var part in parts) {
-      final segments = part.split(';');
-      for (var segment in segments) {
-        final kv = segment.trim().split('=');
-        if (kv.length == 2 && kv[0].isNotEmpty) {
-          jar[kv[0]] = kv[1];
-        }
-      }
-    }
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Login to KHInsider')),
-      body: Center(
-        child:
-            _isLoading
-                ? const CircularProgressIndicator()
-                : ElevatedButton(
-                  onPressed: _performLogin,
-                  child: const Text('Login'),
-                ),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Center(
+          child:
+              _isLoginLoading
+                  ? const CircularProgressIndicator()
+                  : Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      TextField(
+                        controller: _emailController,
+                        decoration: const InputDecoration(
+                          labelText: 'Email',
+                          border: OutlineInputBorder(),
+                        ),
+                        keyboardType: TextInputType.emailAddress,
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: _passwordController,
+                        decoration: const InputDecoration(
+                          labelText: 'Password',
+                          border: OutlineInputBorder(),
+                        ),
+                        obscureText: true,
+                      ),
+                      const SizedBox(height: 24),
+                    ],
+                  ),
+        ),
       ),
     );
   }
@@ -648,10 +506,19 @@ class _SearchScreenState extends State<SearchScreen>
 
   WebViewController? _webViewController; // Added: Controller for WebView
 
+  // Add missing controllers
+  late final TextEditingController _emailController;
+  late final TextEditingController _passwordController;
+
+  // Add missing variable for login loading state
+  bool _isLoginLoading = false;
+
   @override
   void initState() {
     super.initState();
     _songState = ValueNotifier<SongState>(SongState(0, null));
+    _emailController = TextEditingController();
+    _passwordController = TextEditingController();
     WidgetsBinding.instance.addObserver(this);
     _init();
     _player.sequenceStateStream.listen((state) {
@@ -673,8 +540,16 @@ class _SearchScreenState extends State<SearchScreen>
     await _loadFavorites();
     await _restorePlaybackState();
     await _initDeepLinks();
-    if (PreferencesManager.isLoggedIn()) {
-      await _loadPlaylists(); // Load playlists if logged in
+    debugPrint('Is logged in: ${PreferencesManager.isLoggedIn()}');
+    if (PreferencesManager.getCookies().isNotEmpty) {
+      try {
+        await _loadPlaylists();
+      } catch (e) {
+        debugPrint('Failed to load playlists on init: $e');
+        setState(() {
+          _playlists = [];
+        });
+      }
     }
   }
 
@@ -685,6 +560,8 @@ class _SearchScreenState extends State<SearchScreen>
     _player.dispose();
     _httpClient.close();
     _searchController.dispose();
+    _emailController.dispose();
+    _passwordController.dispose();
     _songState.dispose();
     super.dispose();
   }
@@ -696,11 +573,174 @@ class _SearchScreenState extends State<SearchScreen>
     }
   }
 
+  Future<void> _performLogin() async {
+    if (_emailController.text.isEmpty || _passwordController.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter both email and password')),
+      );
+      return;
+    }
+
+    setState(() => _isLoginLoading = true);
+    final dio = Dio();
+    final cookieJar = CookieJar();
+    dio.interceptors.add(CookieManager(cookieJar));
+
+    try {
+      dio.options.headers = {
+        'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept':
+            'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Origin': 'https://downloads.khinsider.com',
+        'Referer': 'https://downloads.khinsider.com/forums/login',
+        'DNT': '1',
+      };
+
+      debugPrint('Step 1: Getting CSRF token...');
+      const loginUrl = 'https://downloads.khinsider.com/forums/login';
+      final getResponse = await dio
+          .get(loginUrl)
+          .timeout(const Duration(seconds: 10));
+
+      if (getResponse.statusCode != 200) {
+        debugPrint(
+          'Error getting login page: Status ${getResponse.statusCode}',
+        );
+        throw Exception('Failed to load login page: ${getResponse.statusCode}');
+      }
+
+      final doc = html_parser.parse(getResponse.data);
+      final xfToken = doc.querySelector('input[name="_xfToken"]');
+      if (xfToken == null || xfToken.attributes['value'] == null) {
+        debugPrint('Error getting token: No _xfToken found');
+        throw Exception('Missing _xfToken from login page');
+      }
+
+      debugPrint('Step 2: Logging in...');
+      const postUrl =
+          'https://downloads.khinsider.com/forums/index.php?login/login';
+      dio.options.headers['Referer'] = loginUrl;
+      dio.options.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+
+      final loginData = {
+        '_xfToken': xfToken.attributes['value'],
+        'login': _emailController.text.trim(),
+        'password': _passwordController.text,
+        'remember': '1',
+        '_xfRedirect': 'https://downloads.khinsider.com/playlist/browse',
+      };
+
+      final postResponse = await dio
+          .post(
+            postUrl,
+            data: loginData,
+            options: Options(
+              followRedirects: false,
+              validateStatus:
+                  (status) => status != null && status >= 200 && status < 400,
+            ),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (postResponse.statusCode != 302 && postResponse.statusCode != 303) {
+        debugPrint('❌ Login failed: Status ${postResponse.statusCode}');
+        throw Exception(
+          'Login failed: did not redirect (status ${postResponse.statusCode})',
+        );
+      }
+
+      final location = postResponse.headers.value('location');
+      if (location == null) {
+        debugPrint('No redirect location found');
+        throw Exception('No redirect location found');
+      }
+
+      final redirectUri =
+          location.startsWith('https://')
+              ? Uri.parse(location)
+              : Uri.parse('https://downloads.khinsider.com$location');
+
+      debugPrint('Trying to load playlist page...');
+      dio.options.headers['Referer'] =
+          'https://downloads.khinsider.com/playlist/';
+      final finalResponse = await dio
+          .get(redirectUri.toString())
+          .timeout(const Duration(seconds: 10));
+
+      if (finalResponse.statusCode != 200) {
+        debugPrint(
+          'Failed to load playlist: Status code ${finalResponse.statusCode}',
+        );
+        throw Exception('Failed to load playlist: ${finalResponse.statusCode}');
+      }
+
+      final finalDoc = html_parser.parse(finalResponse.data);
+      if (finalDoc.querySelector('a[href*="members"]') == null) {
+        debugPrint('Login verification failed');
+        await PreferencesManager.clearCookies();
+        throw Exception('Login verification failed: User menu not found');
+      }
+
+      final cookies = await cookieJar.loadForRequest(redirectUri);
+      final cookieMap = {for (var cookie in cookies) cookie.name: cookie.value};
+      if (!cookieMap.containsKey('xf_user') ||
+          !cookieMap.containsKey('xf_session')) {
+        debugPrint('Missing required cookies: xf_user or xf_session');
+        await PreferencesManager.clearCookies();
+        throw Exception('Login failed: Missing required cookies');
+      }
+      await PreferencesManager.setCookies(cookieMap);
+      debugPrint('Saved cookies: $cookieMap');
+      debugPrint(
+        'Retrieved cookies after save: ${PreferencesManager.getCookies()}',
+      );
+
+      final playlists = parsePlaylists(finalResponse.data);
+      if (playlists.isEmpty) {
+        debugPrint('No playlists found');
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('No playlists found')));
+      } else {
+        debugPrint('Playlists:');
+        for (var playlist in playlists) {
+          debugPrint(
+            '- ${playlist.name} (${playlist.songCount} tracks) - https://downloads.khinsider${playlist.url}',
+          );
+        }
+      }
+
+      setState(() {
+        _playlists = playlists;
+        _emailController.clear();
+        _passwordController.clear();
+        _isLoginLoading = false;
+      });
+
+      debugPrint('✅ Login successful, playlists loaded');
+    } catch (e) {
+      debugPrint('Login error: $e');
+      await PreferencesManager.clearCookies();
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Login failed: $e')));
+      }
+      setState(() => _isLoginLoading = false);
+    } finally {
+      dio.close();
+    }
+  }
+
   Future<void> _savePlaybackState() async {
     final currentSongUrl = _songState.value.url;
     if (currentSongUrl == null || _playlist == null) return;
 
     final prefs = await SharedPreferences.getInstance();
+    debugPrint('All SharedPreferences keys: ${prefs.getKeys()}');
+
     await prefs.setString('currentSongUrl', currentSongUrl);
     await prefs.setInt('currentSongIndex', _songState.value.index);
     await prefs.setBool('isFavoritesSelected', _isFavoritesSelected);
@@ -1112,36 +1152,98 @@ class _SearchScreenState extends State<SearchScreen>
     await PreferencesManager.setString('favorites', favoritesJson);
   }
 
-  // New: Load playlists
-  Future<void> _loadPlaylists() async {
+  Future<bool> _validateSession() async {
+    final cookies = PreferencesManager.getCookies();
+    debugPrint('Validating session with cookies: $cookies');
     if (!PreferencesManager.isLoggedIn()) {
-      debugPrint('User not logged in, navigating to login screen');
-      await Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder:
-              (context) => LoginScreen(
-                onLoginSuccess: (controller) {
-                  setState(() {
-                    _webViewController = controller;
-                  });
-                },
-              ),
-        ),
-      );
-      if (!PreferencesManager.isLoggedIn()) {
-        debugPrint('Login canceled or failed');
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Login canceled or failed.')),
-        );
-        return;
-      }
+      debugPrint('Not logged in: missing xf_user or xf_session');
+      return false;
     }
 
+    final cookieString = cookies.entries
+        .map((e) => '${e.key}=${e.value}')
+        .join('; ');
+    debugPrint('Cookie string: $cookieString');
+    final client = http.Client();
     try {
+      final response = await client
+          .get(
+            Uri.parse('https://downloads.khinsider.com/playlist/browse'),
+            headers: {
+              'Cookie': cookieString,
+              'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+              'Accept':
+                  'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Encoding': 'gzip, deflate, br',
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+          )
+          .timeout(const Duration(seconds: 5));
+      debugPrint('Session validation status: ${response.statusCode}');
+      debugPrint(
+        'Response body snippet: ${response.body.substring(0, response.body.length > 200 ? 200 : response.body.length)}',
+      );
+
+      final document = html_parser.parse(response.body);
+      final title = document.querySelector('title')?.text.trim();
+      debugPrint('Page title: $title');
+
+      final directory = await getApplicationDocumentsDirectory();
+      final file = File('${directory.path}/session_validation.html');
+      await file.writeAsString(response.body);
+      debugPrint('Saved session validation HTML to ${file.path}');
+
+      return response.statusCode == 200 &&
+          title == 'My Playlists - KHInsider Video Game Music';
+    } catch (e) {
+      debugPrint('Session validation failed: $e');
+      return false;
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<void> _loadPlaylists() async {
+    final cookies = PreferencesManager.getCookies();
+    debugPrint('Cookies before fetching playlists: $cookies');
+    if (!cookies.isNotEmpty || !PreferencesManager.isLoggedIn()) {
+      debugPrint('No valid cookies found, user not logged in');
+      setState(() {
+        _playlists = [];
+        _isLoginLoading = false;
+      });
+      return;
+    }
+
+    setState(() => _isLoginLoading = true);
+    try {
+      if (!await _validateSession()) {
+        if (await _refreshSession() && await _validateSession()) {
+          // Session refreshed, proceed
+        } else {
+          await PreferencesManager.clearCookies();
+          setState(() {
+            _playlists = [];
+            _selectedPlaylist = null;
+            _songs = [];
+            _playlist = null;
+            _isFavoritesSelected = false;
+            _isLoginLoading = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Session expired. Please log in again.'),
+            ),
+          );
+          return;
+        }
+      }
+
       final playlists = await fetchPlaylists();
       setState(() {
         _playlists = playlists;
+        _isLoginLoading = false;
       });
       if (playlists.isEmpty) {
         ScaffoldMessenger.of(
@@ -1150,67 +1252,80 @@ class _SearchScreenState extends State<SearchScreen>
       }
     } catch (e) {
       debugPrint('Error fetching playlists: $e');
-      // Fallback to WebView
-      if (_webViewController != null) {
-        try {
-          final currentUrl = await _webViewController!.currentUrl();
-          if (currentUrl != 'https://downloads.khinsider.com/playlist/browse') {
-            await _webViewController!.loadRequest(
-              Uri.parse('https://downloads.khinsider.com/playlist/browse'),
-            );
-            await Future.delayed(const Duration(seconds: 2));
-          }
-
-          final fullHtml =
-              await _webViewController!.runJavaScriptReturningResult(
-                    'document.documentElement.outerHTML',
-                  )
-                  as String;
-          debugPrint(
-            'WebView HTML (first 500 chars): ${fullHtml.substring(0, fullHtml.length.clamp(0, 500))}',
-          );
-
-          final directory = await getApplicationDocumentsDirectory();
-          final file = File('${directory.path}/playlist_page_webview.html');
-          await file.writeAsString(fullHtml);
-          debugPrint('Saved WebView HTML to ${file.path}');
-
-          final document = html_parser.parse(fullHtml);
-          final hasLoginForm = document.querySelector('form') != null;
-          if (hasLoginForm) {
-            debugPrint('Login page detected in WebView');
-            await PreferencesManager.clearCookies();
-            setState(() {
-              _webViewController = null;
-            });
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Session expired. Please log in again.'),
-              ),
-            );
-            return;
-          }
-
-          final playlists = parsePlaylists(fullHtml);
-          setState(() {
-            _playlists = playlists;
-          });
-          if (playlists.isEmpty) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('No playlists found.')),
-            );
-          }
-        } catch (e) {
-          debugPrint('WebView error: $e');
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error fetching playlists: $e')),
-          );
-        }
+      if (e.toString().contains('Session expired') ||
+          e.toString().contains('User not logged in')) {
+        await PreferencesManager.clearCookies();
+        setState(() {
+          _playlists = [];
+          _selectedPlaylist = null;
+          _songs = [];
+          _playlist = null;
+          _isFavoritesSelected = false;
+          _isLoginLoading = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Session expired. Please log in again.'),
+          ),
+        );
       } else {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Error fetching playlists: $e')));
+        setState(() {
+          _playlists = [];
+          _isLoginLoading = false;
+        });
       }
+    }
+  }
+
+  // New: Refresh session (dummy implementation, always returns false)
+  Future<bool> _refreshSession() async {
+    final cookies = PreferencesManager.getCookies();
+    if (!PreferencesManager.isLoggedIn()) return false;
+
+    final cookieString = cookies.entries
+        .map((e) => '${e.key}=${e.value}')
+        .join('; ');
+    final dio = Dio();
+    final cookieJar = CookieJar();
+    dio.interceptors.add(CookieManager(cookieJar));
+
+    try {
+      dio.options.headers = {
+        'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+        'Accept':
+            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Cookie': cookieString,
+      };
+
+      final response = await dio
+          .get('https://downloads.khinsider.com/')
+          .timeout(const Duration(seconds: 5));
+      if (response.statusCode != 200) return false;
+
+      final newCookies = await cookieJar.loadForRequest(
+        Uri.parse('https://downloads.khinsider.com/'),
+      );
+      final cookieMap = {
+        for (var cookie in newCookies) cookie.name: cookie.value,
+      };
+      if (cookieMap.containsKey('xf_user') &&
+          cookieMap.containsKey('xf_session')) {
+        await PreferencesManager.setCookies(cookieMap);
+        debugPrint('Session refreshed with cookies: $cookieMap');
+        return true;
+      }
+      return false;
+    } catch (e) {
+      debugPrint('Session refresh failed: $e');
+      return false;
+    } finally {
+      dio.close();
     }
   }
 
@@ -1597,6 +1712,8 @@ class _SearchScreenState extends State<SearchScreen>
       _songs = [];
       _playlist = null;
       _isFavoritesSelected = false;
+      _emailController.clear();
+      _passwordController.clear();
     });
     _player.stop();
     ScaffoldMessenger.of(
@@ -1803,34 +1920,50 @@ class _SearchScreenState extends State<SearchScreen>
     );
   }
 
-  // Modified: Favorites list now shows playlists or login button
   Widget _buildFavoritesList() {
-    if (!PreferencesManager.isLoggedIn()) {
+    if (!PreferencesManager.isLoggedIn() && !_isLoginLoading) {
       return Center(
-        child: ElevatedButton(
-          onPressed: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder:
-                    (context) => LoginScreen(
-                      onLoginSuccess: (controller) {
-                        setState(() {
-                          _webViewController = controller;
-                        });
-                        _loadPlaylists(); // Reload playlists after login
-                      },
-                    ),
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              TextField(
+                controller: _emailController,
+                decoration: const InputDecoration(
+                  labelText: 'Email',
+                  border: OutlineInputBorder(),
+                ),
+                keyboardType: TextInputType.emailAddress,
               ),
-            );
-          },
-          child: const Text('Login to KHInsider'),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _passwordController,
+                decoration: const InputDecoration(
+                  labelText: 'Password',
+                  border: OutlineInputBorder(),
+                ),
+                obscureText: true,
+              ),
+              const SizedBox(height: 24),
+              _isLoginLoading
+                  ? const CircularProgressIndicator()
+                  : ElevatedButton(
+                    onPressed: () async {
+                      await _performLogin();
+                      if (PreferencesManager.isLoggedIn()) {
+                        await _loadPlaylists();
+                      }
+                    },
+                    child: const Text('Login'),
+                  ),
+            ],
+          ),
         ),
       );
     }
 
     if (_selectedPlaylist != null) {
-      // Show songs for selected playlist
       return ListView(
         children: [
           const SizedBox(height: 16),
@@ -1893,7 +2026,6 @@ class _SearchScreenState extends State<SearchScreen>
       );
     }
 
-    // Show playlist list
     return Column(
       children: [
         Padding(
@@ -1910,40 +2042,43 @@ class _SearchScreenState extends State<SearchScreen>
           ),
         ),
         Expanded(
-          child: FutureBuilder<List<Playlist>>(
-            future: fetchPlaylists(),
-            builder: (context, snapshot) {
-              if (snapshot.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
-              } else if (snapshot.hasError) {
-                return Center(child: Text('Error: ${snapshot.error}'));
-              } else if (!snapshot.hasData || snapshot.data!.isEmpty) {
-                return const Center(child: Text('No playlists found.'));
-              } else {
-                _playlists = snapshot.data!;
-                return ListView.builder(
-                  itemCount: _playlists.length,
-                  itemBuilder: (context, index) {
-                    final playlist = _playlists[index];
-                    return ListTile(
-                      leading: const CircleAvatar(
-                        backgroundColor: Colors.grey,
-                        child: Icon(Icons.playlist_play, color: Colors.white),
-                      ),
-                      title: Text(playlist.name),
-                      subtitle: Text('${playlist.songCount} songs'),
-                      onTap: () {
-                        setState(() {
-                          _selectedPlaylist = playlist;
-                        });
-                        _fetchPlaylistSongs(playlist.url);
-                      },
-                    );
-                  },
-                );
-              }
-            },
-          ),
+          child:
+              _isLoginLoading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _playlists.isEmpty
+                  ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Text('No playlists available.'),
+                        const SizedBox(height: 16),
+                        ElevatedButton(
+                          onPressed: _loadPlaylists,
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
+                  )
+                  : ListView.builder(
+                    itemCount: _playlists.length,
+                    itemBuilder: (context, index) {
+                      final playlist = _playlists[index];
+                      return ListTile(
+                        leading: const CircleAvatar(
+                          backgroundColor: Colors.grey,
+                          child: Icon(Icons.playlist_play, color: Colors.white),
+                        ),
+                        title: Text(playlist.name),
+                        subtitle: Text('${playlist.songCount} songs'),
+                        onTap: () {
+                          setState(() {
+                            _selectedPlaylist = playlist;
+                          });
+                          _fetchPlaylistSongs(playlist.url);
+                        },
+                      );
+                    },
+                  ),
         ),
       ],
     );
@@ -2349,15 +2484,17 @@ class _SearchScreenState extends State<SearchScreen>
                 ? null
                 : BottomNavigationBar(
                   currentIndex: _currentNavIndex,
-                  onTap: (index) {
+                  onTap: (index) async {
                     setState(() {
                       _currentNavIndex = index;
                       _selectedAlbum = null;
                       _selectedPlaylist = null;
                       _isFavoritesSelected = index == 1;
                     });
-                    if (index == 2) {
-                      Navigator.push(
+                    if (index == 1 && PreferencesManager.isLoggedIn()) {
+                      await _loadPlaylists(); // Refresh playlists when selecting playlists tab
+                    } else if (index == 2) {
+                      final result = await Navigator.push(
                         context,
                         MaterialPageRoute(
                           builder:
@@ -2365,13 +2502,17 @@ class _SearchScreenState extends State<SearchScreen>
                                 onThemeChanged: widget.onThemeChanged,
                               ),
                         ),
-                      ).then((_) {
-                        setState(() {
-                          _currentNavIndex = 0;
-                          _selectedAlbum = null;
-                          _selectedPlaylist = null;
-                          _isFavoritesSelected = false;
-                        });
+                      );
+                      setState(() {
+                        _currentNavIndex = 0;
+                        _selectedAlbum = null;
+                        _selectedPlaylist = null;
+                        _isFavoritesSelected = false;
+                        if (result == 'logout') {
+                          _playlists = [];
+                          _emailController.clear();
+                          _passwordController.clear();
+                        }
                       });
                     }
                   },
@@ -2491,10 +2632,13 @@ class SettingsScreen extends StatelessWidget {
                             content: Text('Logged out successfully'),
                           ),
                         );
-                        // Navigate back to refresh the playlist page
-                        Navigator.pop(context);
+                        // Navigate back and force playlist tab to show login UI
+                        Navigator.pop(
+                          context,
+                          'logout',
+                        ); // Pass signal to refresh
                       }
-                      : null, // Disable button if not logged in
+                      : null,
               child: const Text('Logout'),
             ),
           ],
