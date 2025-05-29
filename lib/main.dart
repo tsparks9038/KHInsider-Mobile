@@ -1346,6 +1346,8 @@ class _SearchScreenState extends State<SearchScreen>
       },
     );
 
+    debugPrint(response.body);
+
     if (response.statusCode != 200) {
       throw Exception('Failed to load playlist: ${response.statusCode}');
     }
@@ -2033,12 +2035,18 @@ class _SearchScreenState extends State<SearchScreen>
         .map((e) => '${e.key}=${e.value}')
         .join('; ');
     final client = http.Client();
+
+    debugPrint(playlistId);
+
     try {
+      final url = Uri.parse(
+        'https://downloads.khinsider.com/playlist/popup_toggle?songid=${Uri.encodeQueryComponent(songId)}&playlistid=${Uri.encodeQueryComponent(playlistId)}',
+      );
+
+      debugPrint(url.toString());
       final response = await client
           .get(
-            Uri.parse(
-              'https://downloads.khinsider.com/playlist/popup_toggle?songid=$songId&playlistid=$playlistId',
-            ),
+            url,
             headers: {
               'Cookie': cookieString,
               'User-Agent':
@@ -2052,15 +2060,18 @@ class _SearchScreenState extends State<SearchScreen>
           .timeout(const Duration(seconds: 10));
 
       debugPrint('Toggle playlist status: ${response.statusCode}');
-      if (response.statusCode != 200) {
-        throw Exception('Failed to toggle playlist: ${response.statusCode}');
-      }
-
       final document = html_parser.parse(response.body);
-      final title = document.querySelector('title')?.text.trim();
-      if (title == 'Please Log In') {
-        throw Exception('Session expired, login required');
-      }
+      // final title = document.querySelector('title')?.text.trim();
+      // debugPrint('Create playlist page title: $title');
+
+      // if (response.statusCode != 200 || title == 'Please Log In') {
+      //   throw Exception('Session expired or failed to create playlist');
+      // }
+    } catch (e) {
+      debugPrint('Error toggling playlist: $e');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to toggle playlist: $e')));
     } finally {
       client.close();
     }
@@ -2077,16 +2088,13 @@ class _SearchScreenState extends State<SearchScreen>
       );
       return;
     }
-    debugPrint('Fetching playlists for songId: $songId');
 
     setState(() => _isLoginLoading = true);
     List<Map<String, dynamic>> playlists;
     try {
       playlists = await _fetchPlaylistPopup(songId);
-      debugPrint('Received playlists: $playlists');
     } catch (e) {
       setState(() => _isLoginLoading = false);
-      debugPrint('Failed to load playlists: $e');
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Failed to load playlists: $e')));
@@ -2095,7 +2103,6 @@ class _SearchScreenState extends State<SearchScreen>
     setState(() => _isLoginLoading = false);
 
     if (playlists.isEmpty) {
-      debugPrint('No playlists available for songId: $songId');
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('No playlists available')));
@@ -2128,13 +2135,16 @@ class _SearchScreenState extends State<SearchScreen>
                                 if (value == null) return;
                                 setState(() => _isLoginLoading = true);
                                 try {
-                                  await _togglePlaylistMembership(
-                                    songId,
+                                  final numericPlaylistId = _extractNumericId(
                                     playlistId,
                                   );
-                                  setDialogState(() {
-                                    checkboxStates[playlistId] = value;
-                                  });
+                                  await _togglePlaylistMembership(
+                                    songId,
+                                    numericPlaylistId,
+                                  );
+                                  setDialogState(
+                                    () => checkboxStates[playlistId] = value,
+                                  );
                                 } catch (e) {
                                   ScaffoldMessenger.of(context).showSnackBar(
                                     SnackBar(
@@ -2160,6 +2170,10 @@ class _SearchScreenState extends State<SearchScreen>
                 ),
           ),
     );
+  }
+
+  String _extractNumericId(String id) {
+    return id.replaceAll(RegExp(r'[^0-9]'), '');
   }
 
   Future<void> _createPlaylist() async {
