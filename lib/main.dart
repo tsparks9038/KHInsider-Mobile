@@ -124,7 +124,10 @@ List<Playlist> parsePlaylists(String htmlBody) {
 
         // Extract image URL directly from first column
         final imgElement = cols[0].querySelector('img');
-        final imageUrl = imgElement?.attributes['src']?.trim();
+        final imageUrl = imgElement?.attributes['src']?.trim().replaceFirst(
+          '/thumbs_small/',
+          '/',
+        );
         final hasDefaultIcon =
             cols[0].querySelector('.albumIconDefaultSmall') != null;
 
@@ -1052,7 +1055,12 @@ class _SearchScreenState extends State<SearchScreen>
             _selectedAlbum = {
               'albumName': fallbackAlbumName,
               'albumUrl': albumUrl,
-              'imageUrl': '',
+              'imageUrl':
+                  _selectedPlaylist!.imageUrl?.replaceFirst(
+                    '/thumbs_small/',
+                    '/',
+                  ) ??
+                  '',
               'type': '',
               'year': '',
               'platform': '',
@@ -1128,7 +1136,14 @@ class _SearchScreenState extends State<SearchScreen>
                   album: map['album'],
                   artist: map['artist'],
                   artUri:
-                      map['artUri'] != null ? Uri.parse(map['artUri']) : null,
+                      map['artUri'] != null
+                          ? Uri.parse(
+                            (map['artUri'] as String).replaceFirst(
+                              '/thumbs_small/',
+                              '/',
+                            ),
+                          )
+                          : null,
                 );
                 return {
                   'audioSource': ProgressiveAudioSource(
@@ -1338,7 +1353,7 @@ class _SearchScreenState extends State<SearchScreen>
   // New: Fetch songs from a playlist
   Future<void> _fetchPlaylistSongs(String playlistUrl) async {
     setState(() {
-      _isSongsLoading = true; // Ensure loading state is set
+      _isSongsLoading = true;
     });
 
     try {
@@ -1359,11 +1374,6 @@ class _SearchScreenState extends State<SearchScreen>
       if (response.statusCode != 200) {
         throw Exception('Failed to load playlist: ${response.statusCode}');
       }
-
-      final directory = await getApplicationDocumentsDirectory();
-      final file = File('${directory.path}/playlist_songs.html');
-      await file.writeAsString(response.body);
-      debugPrint('Saved playlist songs HTML to ${file.path}');
 
       final document = html_parser.parse(response.body);
       final songRows = document.querySelectorAll('#songlist tr');
@@ -1390,9 +1400,6 @@ class _SearchScreenState extends State<SearchScreen>
           continue;
         }
 
-        debugPrint('Row $i HTML: ${row.outerHtml}');
-        debugPrint('Row $i text: ${row.text.trim()}');
-
         final titleCell = cells[3];
         final titleLink = titleCell.querySelector('a');
         if (titleLink == null) {
@@ -1407,6 +1414,7 @@ class _SearchScreenState extends State<SearchScreen>
           continue;
         }
 
+        // Extract album name from the small font link
         final albumLink = titleCell.querySelectorAll('a')[1];
         final albumName = albumLink?.text.trim() ?? 'Unknown Album';
         final albumUrl = albumLink?.attributes['href'] ?? '';
@@ -1420,17 +1428,12 @@ class _SearchScreenState extends State<SearchScreen>
 
         final albumIconCell = cells[2];
         final albumArtImg = albumIconCell.querySelector('img');
-        final albumArtUrl = albumArtImg?.attributes['src'];
-        debugPrint('Row $i album art URL: $albumArtUrl');
-        if (albumArtUrl == null) {
-          debugPrint('Warning: No album art URL for song "$name" at $href');
-        }
+        final albumArtUrl = albumArtImg?.attributes['src']?.replaceFirst(
+          '/thumbs_small/',
+          '/',
+        );
 
         final songId = row.attributes['songid'];
-        if (songId == null) {
-          debugPrint('Warning: No songid for song "$name" at $href');
-        }
-
         final songPageUrl = 'https://downloads.khinsider.com$href';
 
         futures.add(
@@ -1443,7 +1446,8 @@ class _SearchScreenState extends State<SearchScreen>
                     tag: MediaItem(
                       id: mp3Url,
                       title: name,
-                      album: albumName,
+                      album:
+                          albumName, // Use the actual album name from the playlist
                       artist: albumName,
                       artUri:
                           albumArtUrl != null ? Uri.parse(albumArtUrl) : null,
@@ -1472,29 +1476,33 @@ class _SearchScreenState extends State<SearchScreen>
       final results = await Future.wait(futures);
       songs.addAll(results.whereType<Map<String, dynamic>>());
 
-      if (songs.isEmpty) {
-        debugPrint('No valid songs parsed from playlist');
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No valid songs found in playlist')),
-        );
-      } else {
-        debugPrint('Parsed ${songs.length} songs from playlist');
-      }
-
       setState(() {
         _songs = songs;
-        _selectedAlbum = null;
-        _isFavoritesSelected = true;
+        _selectedAlbum = {
+          'albumName':
+              _selectedPlaylist!.name, // Still show playlist name as header
+          'albumUrl': playlistUrl,
+          'imageUrl':
+              _selectedPlaylist!.imageUrl?.replaceFirst(
+                '/thumbs_small/',
+                '/',
+              ) ??
+              '',
+          'type': 'Playlist',
+          'year': '',
+          'platform': '',
+        };
+        _isFavoritesSelected = false;
         _playlist = ConcatenatingAudioSource(
           children:
               songs.map((song) => song['audioSource'] as AudioSource).toList(),
         );
-        _isSongsLoading = false; // Stop loading
+        _isSongsLoading = false;
       });
     } catch (e) {
       debugPrint('Error fetching playlist songs: $e');
       setState(() {
-        _isSongsLoading = false; // Stop loading on error
+        _isSongsLoading = false;
       });
       ScaffoldMessenger.of(
         context,
@@ -1527,7 +1535,10 @@ class _SearchScreenState extends State<SearchScreen>
   Future<void> _playAudioSourceAtIndex(int index, bool isFavorites) async {
     try {
       final songList = isFavorites ? _favorites : _songs;
-      if (index >= songList.length) {
+      debugPrint(
+        'Playing song at index $index, songList length: ${songList.length}, isFavorites: $isFavorites',
+      );
+      if (index >= songList.length || index < 0) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Cannot play song: invalid index.')),
         );
@@ -1701,7 +1712,7 @@ class _SearchScreenState extends State<SearchScreen>
 
         setState(() {
           _selectedAlbum = {
-            'imageUrl': imageUrl,
+            'imageUrl': imageUrl.replaceFirst('/thumbs_small/', '/'),
             'albumName': albumName,
             'albumUrl': albumUrl,
             'type': type,
@@ -1720,7 +1731,7 @@ class _SearchScreenState extends State<SearchScreen>
           {
             'body': response.body,
             'albumName': albumName,
-            'imageUrl': imageUrl,
+            'imageUrl': imageUrl.replaceFirst('/thumbs_small/', '/'),
             'albumUrl': albumUrl,
           },
         );
@@ -2406,106 +2417,8 @@ class _SearchScreenState extends State<SearchScreen>
         return const Center(child: CircularProgressIndicator());
       }
 
-      // Transform to full-size playlist art
-      final fullSizePlaylistArt =
-          _selectedPlaylist!.imageUrl != null
-              ? _selectedPlaylist!.imageUrl!.replaceFirst('/thumbs_small/', '/')
-              : null;
-      debugPrint(
-        'Playlist ${_selectedPlaylist!.name} fullSizeArt: $fullSizePlaylistArt',
-      );
-
-      return ListView(
-        children: [
-          const SizedBox(height: 16),
-          Center(
-            child: Container(
-              width: 200,
-              height: 200,
-              child:
-                  fullSizePlaylistArt != null
-                      ? Image.network(
-                        fullSizePlaylistArt,
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) {
-                          debugPrint(
-                            'Failed to load playlist art for ${_selectedPlaylist!.name}: $error',
-                          );
-                          return Container(
-                            color: Colors.grey[300],
-                            child: const Icon(Icons.playlist_play, size: 100),
-                          );
-                        },
-                      )
-                      : Container(
-                        color: Colors.grey[300],
-                        child: const Icon(Icons.playlist_play, size: 100),
-                      ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            _selectedPlaylist!.name,
-            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 24),
-          ..._songs.asMap().entries.map((entry) {
-            final index = entry.key;
-            final song = entry.value;
-            final audioSource = song['audioSource'] as ProgressiveAudioSource;
-            final mediaItem = audioSource.tag as MediaItem;
-            debugPrint('Song ${mediaItem.title} artUri: ${mediaItem.artUri}');
-            return ListTile(
-              leading:
-                  mediaItem.artUri != null
-                      ? CircleAvatar(
-                        backgroundImage: NetworkImage(
-                          mediaItem.artUri.toString(),
-                        ),
-                        radius: 30,
-                        onBackgroundImageError: (error, stackTrace) {
-                          debugPrint(
-                            'Failed to load art for ${mediaItem.title}: $error',
-                          );
-                        },
-                      )
-                      : const CircleAvatar(
-                        backgroundColor: Colors.grey,
-                        radius: 30,
-                        child: Icon(Icons.music_note, color: Colors.white),
-                      ),
-              title: Text(
-                mediaItem.title ?? 'Unknown',
-                overflow: TextOverflow.ellipsis,
-              ),
-              subtitle: Text(song['runtime'] ?? 'Unknown'),
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    icon: Icon(
-                      _isFavorited(mediaItem)
-                          ? Icons.favorite
-                          : Icons.favorite_border,
-                      color: _isFavorited(mediaItem) ? Colors.red : null,
-                    ),
-                    onPressed: () => _toggleFavorite(song),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.share),
-                    onPressed: () => _shareSong(song),
-                  ),
-                ],
-              ),
-              onTap: () {
-                _playAudioSourceAtIndex(index, true);
-              },
-            );
-          }),
-          if (_songState.value.url != null) const SizedBox(height: 70),
-        ],
-      );
+      // Use _buildSongList to display playlist songs like an album
+      return _buildSongList();
     }
 
     return Column(
@@ -2587,7 +2500,7 @@ class _SearchScreenState extends State<SearchScreen>
                         onTap: () {
                           setState(() {
                             _selectedPlaylist = playlist;
-                            _isSongsLoading = true; // Start loading
+                            _isSongsLoading = true;
                           });
                           _fetchPlaylistSongs(playlist.url);
                         },
@@ -3185,7 +3098,7 @@ List<Map<String, String>> parseAlbumList(String htmlBody) {
           'platform': platform,
           'type': type,
           'year': year,
-          'imageUrl': imageUrl,
+          'imageUrl': imageUrl.replaceFirst('/thumbs_small/', '/'),
           'albumUrl': albumUrl,
         };
       })
