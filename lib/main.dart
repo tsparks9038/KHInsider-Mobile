@@ -24,8 +24,14 @@ class Playlist {
   final String name;
   final String url;
   final int songCount;
+  final String? imageUrl; // New: Store small image URL
 
-  Playlist({required this.name, required this.url, required this.songCount});
+  Playlist({
+    required this.name,
+    required this.url,
+    required this.songCount,
+    this.imageUrl,
+  });
 }
 
 Future<List<Playlist>> fetchPlaylists() async {
@@ -87,12 +93,23 @@ List<Playlist> parsePlaylists(String htmlBody) {
   final document = html_parser.parse(htmlBody);
   final rows = document.querySelectorAll('#top40 tr');
 
+  debugPrint('Found ${rows.length} rows in #top40 table');
+
   return rows
-      .skip(1)
-      .map((row) {
+      .asMap()
+      .entries
+      .skip(1) // Skip header
+      .map((entry) {
+        final index = entry.key;
+        final row = entry.value;
         final cols = row.querySelectorAll('td');
+
+        debugPrint(
+          'Row $index HTML: ${row.innerHtml.substring(0, row.innerHtml.length > 200 ? 200 : row.innerHtml.length)}...',
+        );
+
         if (cols.length < 3) {
-          debugPrint('Skipping row with insufficient columns: ${cols.length}');
+          debugPrint('Skipping row $index: Only ${cols.length} columns');
           return null;
         }
 
@@ -105,16 +122,27 @@ List<Playlist> parsePlaylists(String htmlBody) {
         );
         final songCount = int.tryParse(songCountText) ?? 0;
 
+        // Extract image URL directly from first column
+        final imgElement = cols[0].querySelector('img');
+        final imageUrl = imgElement?.attributes['src']?.trim();
+        final hasDefaultIcon =
+            cols[0].querySelector('.albumIconDefaultSmall') != null;
+
         debugPrint(
-          'Parsed playlist: name=$name, url=$url, songCount=$songCount',
+          'Row $index: name=$name, url=$url, songCount=$songCount, imageUrl=$imageUrl, hasDefaultIcon=$hasDefaultIcon',
         );
 
         if (url.isEmpty || name == 'Unknown') {
-          debugPrint('Invalid playlist data, skipping');
+          debugPrint('Skipping row $index: Invalid URL or name');
           return null;
         }
 
-        return Playlist(name: name, url: url, songCount: songCount);
+        return Playlist(
+          name: name,
+          url: url,
+          songCount: songCount,
+          imageUrl: hasDefaultIcon ? null : imageUrl,
+        );
       })
       .whereType<Playlist>()
       .toList();
@@ -513,6 +541,7 @@ class _SearchScreenState extends State<SearchScreen>
 
   // Add missing variable for login loading state
   bool _isLoginLoading = false;
+  bool _isSongsLoading = false;
 
   @override
   void initState() {
@@ -1206,78 +1235,54 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   Future<void> _loadPlaylists() async {
-    final cookies = PreferencesManager.getCookies();
-    debugPrint('Cookies before fetching playlists: $cookies');
-    if (!cookies.isNotEmpty || !PreferencesManager.isLoggedIn()) {
-      debugPrint('No valid cookies found, user not logged in');
-      setState(() {
-        _playlists = [];
-        _isLoginLoading = false;
-      });
-      return;
-    }
+    setState(() {
+      _isLoginLoading = true;
+    });
 
-    setState(() => _isLoginLoading = true);
     try {
-      if (!await _validateSession()) {
-        if (await _refreshSession() && await _validateSession()) {
-          // Session refreshed, proceed
-        } else {
-          await PreferencesManager.clearCookies();
-          setState(() {
-            _playlists = [];
-            _selectedPlaylist = null;
-            _songs = [];
-            _playlist = null;
-            _isFavoritesSelected = false;
-            _isLoginLoading = false;
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Session expired. Please log in again.'),
-            ),
-          );
-          return;
-        }
+      final cookies = PreferencesManager.getCookies();
+      final cookieString = cookies.entries
+          .map((e) => '${e.key}=${e.value}')
+          .join('; ');
+
+      final response = await _httpClient.get(
+        Uri.parse('https://downloads.khinsider.com/playlist/browse'),
+        headers: {
+          'Cookie': cookieString,
+          'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+        },
+      );
+
+      debugPrint('Playlist browse response status: ${response.statusCode}');
+      debugPrint(
+        'Playlist browse response body (first 1000 chars): ${response.body.substring(0, response.body.length > 1000 ? 1000 : response.body.length)}',
+      );
+
+      if (response.statusCode != 200) {
+        throw Exception('Failed to load playlists: ${response.statusCode}');
       }
 
-      final playlists = await fetchPlaylists();
+      final directory = await getApplicationDocumentsDirectory();
+      final file = File('${directory.path}/playlists.html');
+      await file.writeAsString(response.body);
+      debugPrint('Saved playlists HTML to ${file.path}');
+
+      final playlists = parsePlaylists(response.body);
+      debugPrint('Parsed ${playlists.length} playlists');
+
       setState(() {
         _playlists = playlists;
         _isLoginLoading = false;
       });
-      if (playlists.isEmpty) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('No playlists found.')));
-      }
     } catch (e) {
-      debugPrint('Error fetching playlists: $e');
-      if (e.toString().contains('Session expired') ||
-          e.toString().contains('User not logged in')) {
-        await PreferencesManager.clearCookies();
-        setState(() {
-          _playlists = [];
-          _selectedPlaylist = null;
-          _songs = [];
-          _playlist = null;
-          _isFavoritesSelected = false;
-          _isLoginLoading = false;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Session expired. Please log in again.'),
-          ),
-        );
-      } else {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Error fetching playlists: $e')));
-        setState(() {
-          _playlists = [];
-          _isLoginLoading = false;
-        });
-      }
+      debugPrint('Error loading playlists: $e');
+      setState(() {
+        _isLoginLoading = false;
+      });
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to load playlists: $e')));
     }
   }
 
@@ -1332,93 +1337,169 @@ class _SearchScreenState extends State<SearchScreen>
 
   // New: Fetch songs from a playlist
   Future<void> _fetchPlaylistSongs(String playlistUrl) async {
-    final cookies = PreferencesManager.getCookies();
-    final cookieString = cookies.entries
-        .map((e) => '${e.key}=${e.value}')
-        .join('; ');
-
-    final response = await _httpClient.get(
-      Uri.parse('https://downloads.khinsider.com$playlistUrl'),
-      headers: {
-        'Cookie': cookieString,
-        'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      },
-    );
-
-    debugPrint(response.body);
-
-    if (response.statusCode != 200) {
-      throw Exception('Failed to load playlist: ${response.statusCode}');
-    }
-
-    final document = html_parser.parse(response.body);
-    final songRows = document.querySelectorAll('#songlist tr');
-
-    final List<Map<String, dynamic>> songs = [];
-    final List<Future<Map<String, dynamic>?>> futures = [];
-    final pool = Pool(Platform.numberOfProcessors);
-
-    for (var i = 0; i < songRows.length; i++) {
-      final row = songRows[i];
-      final links = row.querySelectorAll('a');
-      if (links.length < 2) continue;
-
-      final name = links[0].text.trim();
-      final runtime = links[1].text.trim();
-      final href = links[0].attributes['href'];
-      if (href == null || name.isEmpty || runtime.isEmpty) continue;
-
-      final songPageUrl = 'https://downloads.khinsider.com$href';
-
-      futures.add(
-        pool.withResource(
-          () => _parseSongPage(songPageUrl)
-              .then((songData) {
-                final mp3Url = songData['mp3Url']!;
-                final albumUrl = songData['albumUrl']!;
-                final albumName = songData['albumName']!;
-                final audioSource = ProgressiveAudioSource(
-                  Uri.parse(mp3Url),
-                  tag: MediaItem(
-                    id: mp3Url,
-                    title: name,
-                    album: albumName,
-                    artist: albumName,
-                    artUri: null, // Playlist songs may not have album art
-                  ),
-                );
-                return {
-                  'audioSource': audioSource,
-                  'runtime': runtime,
-                  'albumUrl': albumUrl.replaceFirst(
-                    'https://downloads.khinsider.com',
-                    '',
-                  ),
-                  'index': i,
-                  'songPageUrl': songPageUrl,
-                };
-              })
-              .catchError((e) {
-                debugPrint('Error fetching song: $e');
-                return null;
-              }),
-        ),
-      );
-    }
-
-    final results = await Future.wait(futures);
-    songs.addAll(results.whereType<Map<String, dynamic>>());
-
     setState(() {
-      _songs = songs;
-      _selectedAlbum = null; // Clear selected album
-      _isFavoritesSelected = true; // Treat playlist as favorites
-      _playlist = ConcatenatingAudioSource(
-        children:
-            songs.map((song) => song['audioSource'] as AudioSource).toList(),
-      );
+      _isSongsLoading = true; // Ensure loading state is set
     });
+
+    try {
+      final cookies = PreferencesManager.getCookies();
+      final cookieString = cookies.entries
+          .map((e) => '${e.key}=${e.value}')
+          .join('; ');
+
+      final response = await _httpClient.get(
+        Uri.parse('https://downloads.khinsider.com$playlistUrl'),
+        headers: {
+          'Cookie': cookieString,
+          'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+        },
+      );
+
+      if (response.statusCode != 200) {
+        throw Exception('Failed to load playlist: ${response.statusCode}');
+      }
+
+      final directory = await getApplicationDocumentsDirectory();
+      final file = File('${directory.path}/playlist_songs.html');
+      await file.writeAsString(response.body);
+      debugPrint('Saved playlist songs HTML to ${file.path}');
+
+      final document = html_parser.parse(response.body);
+      final songRows = document.querySelectorAll('#songlist tr');
+
+      if (songRows.isEmpty) {
+        debugPrint('No rows found in #songlist');
+        throw Exception('No songs found in playlist');
+      }
+
+      final List<Map<String, dynamic>> songs = [];
+      final List<Future<Map<String, dynamic>?>> futures = [];
+      final pool = Pool(Platform.numberOfProcessors);
+
+      for (var i = 0; i < songRows.length; i++) {
+        final row = songRows[i];
+        if (row.id == 'songlist_header' || row.id == 'songlist_footer') {
+          debugPrint('Skipping row $i: Header or footer row');
+          continue;
+        }
+
+        final cells = row.querySelectorAll('td');
+        if (cells.length < 8) {
+          debugPrint('Skipping row $i: Only ${cells.length} cells found');
+          continue;
+        }
+
+        debugPrint('Row $i HTML: ${row.outerHtml}');
+        debugPrint('Row $i text: ${row.text.trim()}');
+
+        final titleCell = cells[3];
+        final titleLink = titleCell.querySelector('a');
+        if (titleLink == null) {
+          debugPrint('Skipping row $i: No title link found');
+          continue;
+        }
+
+        final name = titleLink.text.trim();
+        final href = titleLink.attributes['href'];
+        if (href == null || name.isEmpty) {
+          debugPrint('Skipping row $i: Missing href or name');
+          continue;
+        }
+
+        final albumLink = titleCell.querySelectorAll('a')[1];
+        final albumName = albumLink?.text.trim() ?? 'Unknown Album';
+        final albumUrl = albumLink?.attributes['href'] ?? '';
+
+        final runtimeCell = cells[4];
+        final runtime = runtimeCell.text.trim();
+        if (runtime.isEmpty || !RegExp(r'^\d+:\d{2}$').hasMatch(runtime)) {
+          debugPrint('Skipping row $i: Invalid runtime format "$runtime"');
+          continue;
+        }
+
+        final albumIconCell = cells[2];
+        final albumArtImg = albumIconCell.querySelector('img');
+        final albumArtUrl = albumArtImg?.attributes['src'];
+        debugPrint('Row $i album art URL: $albumArtUrl');
+        if (albumArtUrl == null) {
+          debugPrint('Warning: No album art URL for song "$name" at $href');
+        }
+
+        final songId = row.attributes['songid'];
+        if (songId == null) {
+          debugPrint('Warning: No songid for song "$name" at $href');
+        }
+
+        final songPageUrl = 'https://downloads.khinsider.com$href';
+
+        futures.add(
+          pool.withResource(
+            () => _parseSongPage(songPageUrl)
+                .then((songData) {
+                  final mp3Url = songData['mp3Url']!;
+                  final audioSource = ProgressiveAudioSource(
+                    Uri.parse(mp3Url),
+                    tag: MediaItem(
+                      id: mp3Url,
+                      title: name,
+                      album: albumName,
+                      artist: albumName,
+                      artUri:
+                          albumArtUrl != null ? Uri.parse(albumArtUrl) : null,
+                    ),
+                  );
+                  return {
+                    'audioSource': audioSource,
+                    'runtime': runtime,
+                    'albumUrl': albumUrl.replaceFirst(
+                      'https://downloads.khinsider.com',
+                      '',
+                    ),
+                    'index': songs.length,
+                    'songPageUrl': songPageUrl,
+                    'songId': songId,
+                  };
+                })
+                .catchError((e) {
+                  debugPrint('Error fetching song: $e');
+                  return null;
+                }),
+          ),
+        );
+      }
+
+      final results = await Future.wait(futures);
+      songs.addAll(results.whereType<Map<String, dynamic>>());
+
+      if (songs.isEmpty) {
+        debugPrint('No valid songs parsed from playlist');
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No valid songs found in playlist')),
+        );
+      } else {
+        debugPrint('Parsed ${songs.length} songs from playlist');
+      }
+
+      setState(() {
+        _songs = songs;
+        _selectedAlbum = null;
+        _isFavoritesSelected = true;
+        _playlist = ConcatenatingAudioSource(
+          children:
+              songs.map((song) => song['audioSource'] as AudioSource).toList(),
+        );
+        _isSongsLoading = false; // Stop loading
+      });
+    } catch (e) {
+      debugPrint('Error fetching playlist songs: $e');
+      setState(() {
+        _isSongsLoading = false; // Stop loading on error
+      });
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to load songs: $e')));
+    }
   }
 
   Future<List<Map<String, String>>> _fetchAlbumsAsync(String query) async {
@@ -2318,6 +2399,22 @@ class _SearchScreenState extends State<SearchScreen>
     }
 
     if (_selectedPlaylist != null) {
+      if (_isSongsLoading) {
+        debugPrint(
+          'Showing loading screen for playlist ${_selectedPlaylist!.name}',
+        );
+        return const Center(child: CircularProgressIndicator());
+      }
+
+      // Transform to full-size playlist art
+      final fullSizePlaylistArt =
+          _selectedPlaylist!.imageUrl != null
+              ? _selectedPlaylist!.imageUrl!.replaceFirst('/thumbs_small/', '/')
+              : null;
+      debugPrint(
+        'Playlist ${_selectedPlaylist!.name} fullSizeArt: $fullSizePlaylistArt',
+      );
+
       return ListView(
         children: [
           const SizedBox(height: 16),
@@ -2325,8 +2422,25 @@ class _SearchScreenState extends State<SearchScreen>
             child: Container(
               width: 200,
               height: 200,
-              color: Colors.grey[300],
-              child: const Icon(Icons.playlist_play, size: 100),
+              child:
+                  fullSizePlaylistArt != null
+                      ? Image.network(
+                        fullSizePlaylistArt,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) {
+                          debugPrint(
+                            'Failed to load playlist art for ${_selectedPlaylist!.name}: $error',
+                          );
+                          return Container(
+                            color: Colors.grey[300],
+                            child: const Icon(Icons.playlist_play, size: 100),
+                          );
+                        },
+                      )
+                      : Container(
+                        color: Colors.grey[300],
+                        child: const Icon(Icons.playlist_play, size: 100),
+                      ),
             ),
           ),
           const SizedBox(height: 12),
@@ -2341,12 +2455,26 @@ class _SearchScreenState extends State<SearchScreen>
             final song = entry.value;
             final audioSource = song['audioSource'] as ProgressiveAudioSource;
             final mediaItem = audioSource.tag as MediaItem;
+            debugPrint('Song ${mediaItem.title} artUri: ${mediaItem.artUri}');
             return ListTile(
-              leading: const CircleAvatar(
-                backgroundColor: Colors.grey,
-                radius: 30,
-                child: Icon(Icons.music_note, color: Colors.white),
-              ),
+              leading:
+                  mediaItem.artUri != null
+                      ? CircleAvatar(
+                        backgroundImage: NetworkImage(
+                          mediaItem.artUri.toString(),
+                        ),
+                        radius: 30,
+                        onBackgroundImageError: (error, stackTrace) {
+                          debugPrint(
+                            'Failed to load art for ${mediaItem.title}: $error',
+                          );
+                        },
+                      )
+                      : const CircleAvatar(
+                        backgroundColor: Colors.grey,
+                        radius: 30,
+                        child: Icon(Icons.music_note, color: Colors.white),
+                      ),
               title: Text(
                 mediaItem.title ?? 'Unknown',
                 overflow: TextOverflow.ellipsis,
@@ -2429,16 +2557,37 @@ class _SearchScreenState extends State<SearchScreen>
                     itemCount: _playlists.length,
                     itemBuilder: (context, index) {
                       final playlist = _playlists[index];
+                      debugPrint(
+                        'Playlist ${playlist.name} imageUrl: ${playlist.imageUrl}',
+                      );
                       return ListTile(
-                        leading: const CircleAvatar(
-                          backgroundColor: Colors.grey,
-                          child: Icon(Icons.playlist_play, color: Colors.white),
-                        ),
+                        leading:
+                            playlist.imageUrl != null
+                                ? CircleAvatar(
+                                  backgroundImage: NetworkImage(
+                                    playlist.imageUrl!,
+                                  ),
+                                  radius: 30,
+                                  onBackgroundImageError: (error, stackTrace) {
+                                    debugPrint(
+                                      'Failed to load art for ${playlist.name}: $error',
+                                    );
+                                  },
+                                )
+                                : const CircleAvatar(
+                                  backgroundColor: Colors.grey,
+                                  radius: 30,
+                                  child: Icon(
+                                    Icons.playlist_play,
+                                    color: Colors.white,
+                                  ),
+                                ),
                         title: Text(playlist.name),
                         subtitle: Text('${playlist.songCount} songs'),
                         onTap: () {
                           setState(() {
                             _selectedPlaylist = playlist;
+                            _isSongsLoading = true; // Start loading
                           });
                           _fetchPlaylistSongs(playlist.url);
                         },
