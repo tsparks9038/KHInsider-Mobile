@@ -243,49 +243,6 @@ class PreferencesManager {
       debugPrint('Error backing up preferences: $e');
     }
   }
-
-  static Future<File> exportPreferences() async {
-    final directory = await getApplicationDocumentsDirectory();
-    final backupFile = File('${directory.path}/$_backupFileName');
-    final exportFile = File('${directory.path}/shared_prefs_export.json');
-
-    if (await backupFile.exists()) {
-      await backupFile.copy(exportFile.path);
-      debugPrint('Preferences exported to ${exportFile.path}');
-    } else {
-      await _backupPreferences();
-      await backupFile.copy(exportFile.path);
-    }
-    return exportFile;
-  }
-
-  static Future<bool> importPreferences(File file) async {
-    try {
-      final jsonString = await file.readAsString();
-      final prefsMap = jsonDecode(jsonString) as Map<String, dynamic>;
-
-      await _prefs!.clear();
-      for (final entry in prefsMap.entries) {
-        if (entry.value is bool) {
-          await _prefs!.setBool(entry.key, entry.value);
-        } else if (entry.value is String) {
-          await _prefs!.setString(entry.key, entry.value);
-        } else if (entry.value is int) {
-          await _prefs!.setInt(entry.key, entry.value);
-        } else if (entry.value is double) {
-          await _prefs!.setDouble(entry.key, entry.value);
-        } else if (entry.value is List<String>) {
-          await _prefs!.setStringList(entry.key, entry.value);
-        }
-      }
-      await _backupPreferences();
-      debugPrint('Preferences imported from ${file.path}');
-      return true;
-    } catch (e) {
-      debugPrint('Error importing preferences: $e');
-      return false;
-    }
-  }
 }
 
 Future<void> main() async {
@@ -2366,7 +2323,7 @@ class _SearchScreenState extends State<SearchScreen>
     }
   }
 
-  Widget _buildFavoritesList() {
+  Widget _buildPlaylistsList() {
     if (!PreferencesManager.isLoggedIn() && !_isLoginLoading) {
       return Center(
         child: Padding(
@@ -2882,7 +2839,7 @@ class _SearchScreenState extends State<SearchScreen>
                               ? (_selectedAlbum == null
                                   ? _buildAlbumList()
                                   : _buildSongList())
-                              : _buildFavoritesList(),
+                              : _buildPlaylistsList(),
                     ),
                   ],
                 ),
@@ -2950,8 +2907,10 @@ class _SearchScreenState extends State<SearchScreen>
                       label: 'Search',
                     ),
                     BottomNavigationBarItem(
-                      icon: Icon(Icons.favorite),
-                      label: 'Playlists',
+                      icon: Icon(
+                        Icons.playlist_play,
+                      ), // Changed from Icons.favorite
+                      label: 'Playlists', // Changed from 'Favorites'
                     ),
                     BottomNavigationBarItem(
                       icon: Icon(Icons.settings),
@@ -2991,63 +2950,6 @@ class SettingsScreen extends StatelessWidget {
                   onThemeChanged(value);
                 }
               },
-            ),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: () async {
-                try {
-                  final file = await PreferencesManager.exportPreferences();
-                  await Share.shareXFiles([
-                    XFile(file.path),
-                  ], text: 'Exported preferences from KHInsider Search');
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        'Preferences exported and shared from ${file.path}',
-                      ),
-                    ),
-                  );
-                } catch (e) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Error exporting preferences: $e')),
-                  );
-                }
-              },
-              child: const Text('Export Preferences'),
-            ),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: () async {
-                final result = await FilePicker.platform.pickFiles(
-                  type: FileType.custom,
-                  allowedExtensions: ['json'],
-                );
-                if (result != null && result.files.single.path != null) {
-                  final file = File(result.files.single.path!);
-                  final success = await PreferencesManager.importPreferences(
-                    file,
-                  );
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        success
-                            ? 'Preferences imported successfully'
-                            : 'Failed to import preferences',
-                      ),
-                    ),
-                  );
-                  if (success) {
-                    // Restart the app to apply new preferences
-                    Navigator.pushReplacement(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => const SearchApp(),
-                      ),
-                    );
-                  }
-                }
-              },
-              child: const Text('Import Preferences'),
             ),
             const SizedBox(height: 16),
             ElevatedButton(
