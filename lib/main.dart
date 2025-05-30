@@ -2411,16 +2411,30 @@ class _SearchScreenState extends State<SearchScreen>
                   textAlign: TextAlign.center,
                 ),
                 IconButton(
-                  icon: Icon(
-                    _isFavorited(song) ? Icons.favorite : Icons.favorite_border,
-                    color: _isFavorited(song) ? Colors.red : null,
-                  ),
-                  onPressed: () {
-                    final songList = _isFavoritesSelected ? _favorites : _songs;
-                    if (songState.index < songList.length) {
-                      _toggleFavorite(songList[songState.index]);
-                    }
-                  },
+                  icon: const Icon(Icons.playlist_add),
+                  tooltip:
+                      PreferencesManager.isLoggedIn()
+                          ? 'Add to Playlist'
+                          : 'Please log in to add to playlist',
+                  onPressed:
+                      PreferencesManager.isLoggedIn()
+                          ? () {
+                            final songList =
+                                _isFavoritesSelected ? _favorites : _songs;
+                            if (songState.index < songList.length) {
+                              debugPrint(
+                                'Opening playlist dialog for song at index ${songState.index}',
+                              );
+                              _showAddToPlaylistDialog(
+                                songList[songState.index],
+                              );
+                            }
+                          }
+                          : () => ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Please log in to add to playlist'),
+                            ),
+                          ),
                 ),
                 const Spacer(),
                 StreamBuilder<Duration>(
@@ -2576,19 +2590,32 @@ class _SearchScreenState extends State<SearchScreen>
                     ),
                   ),
                   IconButton(
-                    icon: Icon(
-                      _isFavorited(song)
-                          ? Icons.favorite
-                          : Icons.favorite_border,
-                      color: _isFavorited(song) ? Colors.red : null,
-                    ),
-                    onPressed: () {
-                      final songList =
-                          _isFavoritesSelected ? _favorites : _songs;
-                      if (songState.index < songList.length) {
-                        _toggleFavorite(songList[songState.index]);
-                      }
-                    },
+                    icon: const Icon(Icons.playlist_add),
+                    tooltip:
+                        PreferencesManager.isLoggedIn()
+                            ? 'Add to Playlist'
+                            : 'Please log in to add to playlist',
+                    onPressed:
+                        PreferencesManager.isLoggedIn()
+                            ? () {
+                              final songList =
+                                  _isFavoritesSelected ? _favorites : _songs;
+                              if (songState.index < songList.length) {
+                                debugPrint(
+                                  'Opening playlist dialog for song at index ${songState.index}',
+                                );
+                                _showAddToPlaylistDialog(
+                                  songList[songState.index],
+                                );
+                              }
+                            }
+                            : () => ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Please log in to add to playlist',
+                                ),
+                              ),
+                            ),
                   ),
                   StreamBuilder<PlayerState>(
                     stream: _player.playerStateStream,
