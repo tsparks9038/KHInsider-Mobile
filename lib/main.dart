@@ -249,10 +249,13 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await JustAudioBackground.init(
     androidNotificationChannelId: 'com.example.khinsider_android.channel.audio',
-    androidNotificationChannelName: 'Audio playback',
+    androidNotificationChannelName: 'Audio Playback',
     androidNotificationOngoing: true,
+    androidShowNotificationBadge: true, // Optional: Show notification badge
+    androidNotificationIcon:
+        'mipmap/ic_launcher', // Ensure you have a proper icon
   );
-  await PreferencesManager.init(); // Ensure this completes
+  await PreferencesManager.init();
   debugPrint('SharedPreferences initialized');
   runApp(const SearchApp());
 }
@@ -1226,12 +1229,30 @@ class _SearchScreenState extends State<SearchScreen>
                     Uri.parse(mp3Url),
                     tag: MediaItem(
                       id: mp3Url,
-                      title: name,
+                      title:
+                          name.isNotEmpty
+                              ? name
+                              : 'Unknown Song', // Ensure non-empty title
                       album:
-                          albumName, // Use the actual album name from the playlist
-                      artist: albumName,
+                          albumName.isNotEmpty
+                              ? albumName
+                              : 'Unknown Album', // Ensure non-empty album
+                      artist:
+                          albumName.isNotEmpty
+                              ? albumName
+                              : 'Unknown Artist', // Ensure non-empty artist
                       artUri:
-                          albumArtUrl != null ? Uri.parse(albumArtUrl) : null,
+                          albumArtUrl!.isNotEmpty
+                              ? Uri.parse(albumArtUrl)
+                              : null, // Optional artwork
+                      duration:
+                          runtime.isNotEmpty &&
+                                  RegExp(r'^\d+:\d{2}$').hasMatch(runtime)
+                              ? Duration(
+                                minutes: int.parse(runtime.split(':')[0]),
+                                seconds: int.parse(runtime.split(':')[1]),
+                              )
+                              : null, // Optional: Add duration if available
                     ),
                   );
                   return {
@@ -1316,9 +1337,6 @@ class _SearchScreenState extends State<SearchScreen>
   Future<void> _playAudioSourceAtIndex(int index, bool isFavorites) async {
     try {
       final songList = isFavorites ? _favorites : _songs;
-      debugPrint(
-        'Playing song at index $index, songList length: ${songList.length}, isFavorites: $isFavorites',
-      );
       if (index >= songList.length || index < 0) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Cannot play song: invalid index.')),
@@ -2442,7 +2460,6 @@ class _SearchScreenState extends State<SearchScreen>
                   builder: (context, snapshot) {
                     final position = snapshot.data ?? Duration.zero;
                     final duration = _player.duration ?? Duration.zero;
-
                     return Column(
                       children: [
                         Slider(
@@ -2945,13 +2962,30 @@ Future<List<Map<String, dynamic>>> parseSongList(
                 Uri.parse(mp3Url),
                 tag: MediaItem(
                   id: mp3Url,
-                  title: name,
-                  album: albumName,
-                  artist: albumName,
+                  title:
+                      name.isNotEmpty
+                          ? name
+                          : 'Unknown Song', // Ensure non-empty title
+                  album:
+                      albumName.isNotEmpty
+                          ? albumName
+                          : 'Unknown Album', // Ensure non-empty album
+                  artist:
+                      albumName.isNotEmpty
+                          ? albumName
+                          : 'Unknown Artist', // Ensure non-empty artist
                   artUri:
                       albumImageUrl.isNotEmpty
                           ? Uri.parse(albumImageUrl)
-                          : null,
+                          : null, // Optional artwork
+                  duration:
+                      runtime.isNotEmpty &&
+                              RegExp(r'^\d+:\d{2}$').hasMatch(runtime)
+                          ? Duration(
+                            minutes: int.parse(runtime.split(':')[0]),
+                            seconds: int.parse(runtime.split(':')[1]),
+                          )
+                          : null, // Optional: Add duration if available
                 ),
               );
               return {
