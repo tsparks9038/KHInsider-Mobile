@@ -1012,12 +1012,7 @@ class _SearchScreenState extends State<SearchScreen>
             _selectedAlbum = {
               'albumName': fallbackAlbumName,
               'albumUrl': albumUrl,
-              'imageUrl':
-                  _selectedPlaylist!.imageUrl?.replaceFirst(
-                    '/thumbs_small/',
-                    '/',
-                  ) ??
-                  '',
+              'imageUrl': '',
               'type': '',
               'year': '',
               'platform': '',
@@ -1562,6 +1557,10 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   Future<void> _fetchAlbumPage(String albumUrl) async {
+    setState(() {
+      _isSongsLoading = true; // Start loading
+      debugPrint('Fetching album page: $albumUrl, setting isSongsLoading=true');
+    });
     final fullUrl = 'https://downloads.khinsider.com$albumUrl';
     try {
       final response = await _httpClient.get(Uri.parse(fullUrl));
@@ -1667,17 +1666,6 @@ class _SearchScreenState extends State<SearchScreen>
           'Final parsed metadata: type="$type", year="$year", platform="$platform"',
         );
 
-        setState(() {
-          _selectedAlbum = {
-            'imageUrl': imageUrl.replaceFirst('/thumbs_small/', '/'),
-            'albumName': albumName,
-            'albumUrl': albumUrl,
-            'type': type,
-            'year': year,
-            'platform': platform,
-          };
-        });
-
         final songs = await compute(
           (input) => parseSongList(
             input['body']!,
@@ -1694,14 +1682,36 @@ class _SearchScreenState extends State<SearchScreen>
         );
 
         setState(() {
+          _selectedAlbum = {
+            'imageUrl': imageUrl.replaceFirst('/thumbs_small/', '/'),
+            'albumName': albumName,
+            'albumUrl': albumUrl,
+            'type': type,
+            'year': year,
+            'platform': platform,
+          };
           _songs = songs;
+          _isSongsLoading = false; // End loading
+          debugPrint(
+            'Album page loaded: ${_songs.length} songs fetched, isSongsLoading=false',
+          );
         });
       } else {
         debugPrint('Error: ${response.statusCode}');
+        setState(() {
+          _isSongsLoading = false; // End loading on error
+          debugPrint(
+            'Album page fetch failed: status=${response.statusCode}, isSongsLoading=false',
+          );
+        });
         throw Exception('Failed to load album page: ${response.statusCode}');
       }
     } catch (e) {
       debugPrint('Error occurred while fetching album page: $e');
+      setState(() {
+        _isSongsLoading = false; // End loading on error
+        debugPrint('Album page fetch error: $e, isSongsLoading=false');
+      });
       throw e;
     }
   }
@@ -1876,9 +1886,28 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   Widget _buildSongList() {
-    if (_selectedAlbum == null) {
-      return const Center(child: Text('No album selected.'));
+    debugPrint(
+      'Building song list: isSongsLoading=$_isSongsLoading, selectedAlbum=${_selectedAlbum != null}, songsCount=${_songs.length}',
+    );
+
+    if (_isSongsLoading) {
+      debugPrint('Showing loading indicator for song list');
+      return const Center(child: CircularProgressIndicator());
     }
+
+    if (_selectedAlbum == null) {
+      debugPrint('No album or playlist selected');
+      return const Center(child: Text('No album or playlist selected.'));
+    }
+
+    if (_songs.isEmpty) {
+      debugPrint('No songs available for ${_selectedAlbum!['albumName']}');
+      return const Center(child: Text('No songs available.'));
+    }
+
+    debugPrint(
+      'Rendering song list for ${_selectedAlbum!['albumName']} with ${_songs.length} songs',
+    );
     return ListView(
       children: [
         const SizedBox(height: 16),
@@ -1892,6 +1921,15 @@ class _SearchScreenState extends State<SearchScreen>
                       width: 200,
                       height: 200,
                       fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) {
+                        debugPrint('Failed to load album image: $error');
+                        return Container(
+                          width: 200,
+                          height: 200,
+                          color: Colors.grey[300],
+                          child: const Icon(Icons.music_note, size: 100),
+                        );
+                      },
                     ),
                   )
                   : Container(
@@ -1977,6 +2015,7 @@ class _SearchScreenState extends State<SearchScreen>
               ],
             ),
             onTap: () {
+              debugPrint('Tapped song at index $index: ${mediaItem.title}');
               _playAudioSourceAtIndex(index, false);
             },
           );
