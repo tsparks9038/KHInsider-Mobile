@@ -474,7 +474,6 @@ class _SearchScreenState extends State<SearchScreen>
   final TextEditingController _searchController = TextEditingController();
   final http.Client _httpClient = http.Client();
   final AudioPlayer _player = AudioPlayer();
-  final AppLinks _appLinks = AppLinks();
   late final ValueNotifier<SongState> _songState;
   bool _isPlayerExpanded = false;
   bool _isShuffleEnabled = false;
@@ -488,8 +487,6 @@ class _SearchScreenState extends State<SearchScreen>
   bool _isFavoritesSelected = false;
   List<String> _albumTypes = ['All'];
   String _selectedType = 'All';
-  StreamSubscription? _uriLinkSubscription;
-  bool _isDeepLinkLoading = false;
   List<Playlist> _playlists = []; // New: Store playlists
   Playlist? _selectedPlaylist; // New: Track selected playlist
 
@@ -529,7 +526,6 @@ class _SearchScreenState extends State<SearchScreen>
     await _loadPreferences();
     await _loadFavorites();
     await _restorePlaybackState();
-    await _initDeepLinks();
     debugPrint('Is logged in: ${PreferencesManager.isLoggedIn()}');
     if (PreferencesManager.getCookies().isNotEmpty) {
       try {
@@ -546,7 +542,6 @@ class _SearchScreenState extends State<SearchScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _uriLinkSubscription?.cancel();
     _player.dispose();
     _httpClient.close();
     _searchController.dispose();
@@ -839,35 +834,6 @@ class _SearchScreenState extends State<SearchScreen>
     }
   }
 
-  Future<void> _initDeepLinks() async {
-    debugPrint('Testing deep links');
-    try {
-      final initialUri = await _appLinks.getInitialLink();
-      debugPrint('Initial: $initialUri');
-      if (initialUri != null) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Link: $initialUri')));
-      }
-
-      _uriLinkSubscription = _appLinks.uriLinkStream.listen(
-        (Uri? uri) {
-          debugPrint('Stream: $uri');
-          if (uri != null) {
-            ScaffoldMessenger.of(
-              context,
-            ).showSnackBar(SnackBar(content: Text('Link: $uri')));
-          }
-        },
-        onError: (e) {
-          debugPrint('Error: $e');
-        },
-      );
-    } catch (e) {
-      debugPrint('Init error: $e');
-    }
-  }
-
   Future<Map<String, String>> _parseSongPage(String songPageUrl) async {
     final response = await _httpClient.get(Uri.parse(songPageUrl));
     if (response.statusCode != 200) {
@@ -913,131 +879,6 @@ class _SearchScreenState extends State<SearchScreen>
       'albumName': albumName,
       'songPageUrl': songPageUrl,
     };
-  }
-
-  Future<void> _handleDeepLink(Uri uri) async {
-    debugPrint('=== Handling deep link: $uri ===');
-    debugPrint('Scheme: ${uri.scheme}, Host: ${uri.host}, Path: ${uri.path}');
-    setState(() {
-      _isDeepLinkLoading = true;
-    });
-
-    try {
-      if (uri.host != 'downloads.khinsider.com' && uri.scheme != 'khinsider') {
-        throw Exception('Invalid host or scheme: ${uri.host}, ${uri.scheme}');
-      }
-
-      if (uri.scheme == 'khinsider' && uri.host == 'auth') {
-        debugPrint('Handling khinsider://auth link');
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Auth link received (not implemented)')),
-        );
-        return;
-      }
-
-      final path = uri.path;
-      if (path.startsWith('/game-soundtracks/album')) {
-        if (path.endsWith('.mp3')) {
-          debugPrint('Processing song link');
-          final songData = await _parseSongPage(uri.toString());
-          debugPrint('Parsed song data: $songData');
-
-          final mp3Url = songData['mp3Url'] ?? '';
-          final songName = songData['songName'] ?? 'Unknown Song';
-          final albumName = songData['albumName'] ?? 'Unknown Album';
-          final songPageUrl = songData['songPageUrl'] ?? '';
-
-          if (mp3Url.isEmpty) {
-            throw Exception('No MP3 URL found');
-          }
-
-          final audioSource = ProgressiveAudioSource(
-            Uri.parse(mp3Url),
-            tag: MediaItem(
-              id: mp3Url,
-              title: songName,
-              album: albumName,
-              artist: albumName,
-              artUri: null,
-            ),
-          );
-
-          setState(() {
-            _songs = [
-              {
-                'audioSource': audioSource,
-                'runtime': 'Unknown',
-                'albumUrl': '',
-                'index': 0,
-                'songPageUrl': songPageUrl,
-              },
-            ];
-            _playlist = ConcatenatingAudioSource(children: [audioSource]);
-            _selectedAlbum = {
-              'albumName': albumName,
-              'albumUrl': '',
-              'imageUrl': '',
-              'type': 'Song',
-              'year': '',
-              'platform': '',
-            };
-            _isPlayerExpanded = true;
-            _isFavoritesSelected = false;
-          });
-
-          debugPrint('Playing song: $songName');
-          await _playAudioSourceAtIndex(0, false);
-        } else {
-          debugPrint('Processing album link');
-          await _fetchAlbumPage(path);
-          debugPrint('Album fetched, songs: ${_songs.length}');
-          if (_songs.isEmpty) {
-            throw Exception('No songs found for album');
-          }
-          setState(() {
-            _isFavoritesSelected = false;
-            _isPlayerExpanded = false;
-          });
-        }
-      } else if (path.startsWith('/playlist/')) {
-        debugPrint('Processing playlist link');
-        if (!PreferencesManager.isLoggedIn()) {
-          throw Exception('Not logged in');
-        }
-
-        setState(() {
-          _selectedPlaylist = Playlist(
-            name: 'Loading Playlist',
-            url: path,
-            songCount: 0,
-          );
-          _isSongsLoading = true;
-        });
-
-        await _fetchPlaylistSongs(path);
-        debugPrint('Playlist fetched, songs: ${_songs.length}');
-        if (_songs.isEmpty) {
-          throw Exception('No songs in playlist');
-        }
-        setState(() {
-          _isFavoritesSelected = false;
-          _isPlayerExpanded = false;
-        });
-      } else {
-        throw Exception('Unsupported path: $path');
-      }
-    } catch (e, stackTrace) {
-      debugPrint('Deep link error: $e');
-      debugPrint('Stack trace: $stackTrace');
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed to load: $e')));
-    } finally {
-      setState(() {
-        _isDeepLinkLoading = false;
-      });
-      debugPrint('=== Deep link handling complete ===');
-    }
   }
 
   Future<void> _loadPreferences() async {
@@ -2773,9 +2614,6 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   Future<bool> _onPop() async {
-    if (_isDeepLinkLoading) {
-      return false;
-    }
     if (_isPlayerExpanded) {
       setState(() {
         _isPlayerExpanded = false;
@@ -2819,7 +2657,7 @@ class _SearchScreenState extends State<SearchScreen>
       },
       child: Scaffold(
         appBar:
-            _isPlayerExpanded || _isDeepLinkLoading
+            _isPlayerExpanded
                 ? null
                 : AppBar(
                   title: const Text('KHInsider Search'),
@@ -2840,41 +2678,38 @@ class _SearchScreenState extends State<SearchScreen>
                 ),
         body: Stack(
           children: [
-            if (_isDeepLinkLoading)
-              const Center(child: CircularProgressIndicator())
-            else
-              Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  children: [
-                    if (_currentNavIndex == 0 && _selectedAlbum == null) ...[
-                      TextField(
-                        controller: _searchController,
-                        decoration: const InputDecoration(
-                          labelText: 'Search Albums',
-                          border: OutlineInputBorder(),
-                        ),
-                        onSubmitted: (value) {
-                          setState(() {});
-                        },
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  if (_currentNavIndex == 0 && _selectedAlbum == null) ...[
+                    TextField(
+                      controller: _searchController,
+                      decoration: const InputDecoration(
+                        labelText: 'Search Albums',
+                        border: OutlineInputBorder(),
                       ),
-                      const SizedBox(height: 16),
-                    ],
-                    Expanded(
-                      child:
-                          _currentNavIndex == 0
-                              ? (_selectedAlbum == null
-                                  ? _buildAlbumList()
-                                  : _buildSongList())
-                              : _buildPlaylistsList(),
+                      onSubmitted: (value) {
+                        setState(() {});
+                      },
                     ),
+                    const SizedBox(height: 16),
                   ],
-                ),
+                  Expanded(
+                    child:
+                        _currentNavIndex == 0
+                            ? (_selectedAlbum == null
+                                ? _buildAlbumList()
+                                : _buildSongList())
+                            : _buildPlaylistsList(),
+                  ),
+                ],
               ),
+            ),
             ValueListenableBuilder<SongState>(
               valueListenable: _songState,
               builder: (context, songState, child) {
-                if (songState.url != null && !_isDeepLinkLoading) {
+                if (songState.url != null) {
                   return Align(
                     alignment: Alignment.bottomCenter,
                     child: AnimatedSwitcher(
@@ -2892,7 +2727,7 @@ class _SearchScreenState extends State<SearchScreen>
           ],
         ),
         bottomNavigationBar:
-            _isPlayerExpanded || _isDeepLinkLoading
+            _isPlayerExpanded
                 ? null
                 : BottomNavigationBar(
                   currentIndex: _currentNavIndex,
