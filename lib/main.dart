@@ -840,31 +840,32 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   Future<void> _initDeepLinks() async {
+    debugPrint('Testing deep links');
     try {
       final initialUri = await _appLinks.getInitialLink();
+      debugPrint('Initial: $initialUri');
       if (initialUri != null) {
-        await _handleDeepLink(initialUri);
-      }
-    } catch (e) {
-      debugPrint('Error getting initial URI: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to process initial link: $e')),
-      );
-    }
-
-    _uriLinkSubscription = _appLinks.uriLinkStream.listen(
-      (Uri? uri) {
-        if (uri != null) {
-          _handleDeepLink(uri);
-        }
-      },
-      onError: (e) {
-        debugPrint('Error in URI stream: $e');
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text('Failed to process link: $e')));
-      },
-    );
+        ).showSnackBar(SnackBar(content: Text('Link: $initialUri')));
+      }
+
+      _uriLinkSubscription = _appLinks.uriLinkStream.listen(
+        (Uri? uri) {
+          debugPrint('Stream: $uri');
+          if (uri != null) {
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text('Link: $uri')));
+          }
+        },
+        onError: (e) {
+          debugPrint('Error: $e');
+        },
+      );
+    } catch (e) {
+      debugPrint('Init error: $e');
+    }
   }
 
   Future<Map<String, String>> _parseSongPage(String songPageUrl) async {
@@ -915,140 +916,127 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   Future<void> _handleDeepLink(Uri uri) async {
-    if (uri.host != 'downloads.khinsider.com' ||
-        !uri.path.startsWith('/game-soundtracks/album')) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Unsupported deep link.')));
-      return;
-    }
-
+    debugPrint('=== Handling deep link: $uri ===');
+    debugPrint('Scheme: ${uri.scheme}, Host: ${uri.host}, Path: ${uri.path}');
     setState(() {
       _isDeepLinkLoading = true;
-      _selectedAlbum = null;
-      _songs = [];
-      _playlist = null;
-      _isFavoritesSelected = false;
     });
-    _songState.value = SongState(0, null);
 
     try {
-      await _loadPreferences();
+      if (uri.host != 'downloads.khinsider.com' && uri.scheme != 'khinsider') {
+        throw Exception('Invalid host or scheme: ${uri.host}, ${uri.scheme}');
+      }
 
-      if (uri.path.endsWith('.mp3')) {
-        // Handle song page deep link
-        final songData = await _parseSongPage(uri.toString());
-        final mp3Url = songData['mp3Url']!;
-        final albumUrl = songData['albumUrl']!;
-        final songName = songData['songName']!;
-        final fallbackAlbumName = songData['albumName']!;
-        final songPageUrl = songData['songPageUrl']!;
+      if (uri.scheme == 'khinsider' && uri.host == 'auth') {
+        debugPrint('Handling khinsider://auth link');
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Auth link received (not implemented)')),
+        );
+        return;
+      }
 
-        if (mp3Url.isEmpty || albumUrl.isEmpty) {
-          throw Exception('Invalid song page: missing MP3 or album URL');
-        }
+      final path = uri.path;
+      if (path.startsWith('/game-soundtracks/album')) {
+        if (path.endsWith('.mp3')) {
+          debugPrint('Processing song link');
+          final songData = await _parseSongPage(uri.toString());
+          debugPrint('Parsed song data: $songData');
 
-        // Fetch album page for full metadata and song list
-        try {
-          await _fetchAlbumPage(
-            albumUrl.replaceFirst('https://downloads.khinsider.com', ''),
-          );
+          final mp3Url = songData['mp3Url'] ?? '';
+          final songName = songData['songName'] ?? 'Unknown Song';
+          final albumName = songData['albumName'] ?? 'Unknown Album';
+          final songPageUrl = songData['songPageUrl'] ?? '';
 
-          // Find the index of the deep-linked song in the album's song list
-          int songIndex = _songs.indexWhere(
-            (song) => song['songPageUrl'] == songPageUrl,
-          );
-          if (songIndex == -1) {
-            // Fallback to matching by MP3 URL
-            songIndex = _songs.indexWhere(
-              (song) =>
-                  (song['audioSource'] as ProgressiveAudioSource).uri
-                      .toString() ==
-                  mp3Url,
-            );
-          }
-          if (songIndex == -1) {
-            throw Exception('Song not found in album song list');
+          if (mp3Url.isEmpty) {
+            throw Exception('No MP3 URL found');
           }
 
-          // Set playlist with all album songs
-          setState(() {
-            _playlist = ConcatenatingAudioSource(
-              children:
-                  _songs
-                      .map((song) => song['audioSource'] as AudioSource)
-                      .toList(),
-            );
-            _isPlayerExpanded = true;
-          });
-
-          await _playAudioSourceAtIndex(songIndex, false);
-        } catch (e) {
-          debugPrint('Error fetching album page: $e');
-          // Fallback to single-song playlist with song page metadata
           final audioSource = ProgressiveAudioSource(
             Uri.parse(mp3Url),
             tag: MediaItem(
               id: mp3Url,
               title: songName,
-              album: fallbackAlbumName,
-              artist: fallbackAlbumName,
+              album: albumName,
+              artist: albumName,
               artUri: null,
             ),
           );
 
-          final song = {
-            'audioSource': audioSource,
-            'runtime': 'Unknown',
-            'albumUrl': albumUrl.replaceFirst(
-              'https://downloads.khinsider.com',
-              '',
-            ),
-            'index': 0,
-            'songPageUrl': songPageUrl,
-          };
-
           setState(() {
+            _songs = [
+              {
+                'audioSource': audioSource,
+                'runtime': 'Unknown',
+                'albumUrl': '',
+                'index': 0,
+                'songPageUrl': songPageUrl,
+              },
+            ];
+            _playlist = ConcatenatingAudioSource(children: [audioSource]);
             _selectedAlbum = {
-              'albumName': fallbackAlbumName,
-              'albumUrl': albumUrl,
+              'albumName': albumName,
+              'albumUrl': '',
               'imageUrl': '',
-              'type': '',
+              'type': 'Song',
               'year': '',
               'platform': '',
             };
-            _songs = [song];
-            _playlist = ConcatenatingAudioSource(children: [audioSource]);
             _isPlayerExpanded = true;
+            _isFavoritesSelected = false;
           });
 
+          debugPrint('Playing song: $songName');
           await _playAudioSourceAtIndex(0, false);
+        } else {
+          debugPrint('Processing album link');
+          await _fetchAlbumPage(path);
+          debugPrint('Album fetched, songs: ${_songs.length}');
+          if (_songs.isEmpty) {
+            throw Exception('No songs found for album');
+          }
+          setState(() {
+            _isFavoritesSelected = false;
+            _isPlayerExpanded = false;
+          });
         }
-      } else {
-        // Handle album page deep link
-        final albumUrl = uri.path;
-        await _fetchAlbumPage(albumUrl);
-
-        if (_songs.isEmpty) {
-          throw Exception('Album not found or no songs available');
+      } else if (path.startsWith('/playlist/')) {
+        debugPrint('Processing playlist link');
+        if (!PreferencesManager.isLoggedIn()) {
+          throw Exception('Not logged in');
         }
 
         setState(() {
+          _selectedPlaylist = Playlist(
+            name: 'Loading Playlist',
+            url: path,
+            songCount: 0,
+          );
+          _isSongsLoading = true;
+        });
+
+        await _fetchPlaylistSongs(path);
+        debugPrint('Playlist fetched, songs: ${_songs.length}');
+        if (_songs.isEmpty) {
+          throw Exception('No songs in playlist');
+        }
+        setState(() {
+          _isFavoritesSelected = false;
           _isPlayerExpanded = false;
         });
+      } else {
+        throw Exception('Unsupported path: $path');
       }
-
+    } catch (e, stackTrace) {
+      debugPrint('Deep link error: $e');
+      debugPrint('Stack trace: $stackTrace');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to load: $e')));
+    } finally {
       setState(() {
         _isDeepLinkLoading = false;
       });
-    } catch (e) {
-      setState(() {
-        _isDeepLinkLoading = false;
-      });
-      debugPrint('Error handling deep link: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to load song or album: $e')),
-      );
+      debugPrint('=== Deep link handling complete ===');
     }
   }
 
