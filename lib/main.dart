@@ -34,6 +34,37 @@ class Playlist {
   });
 }
 
+Future<String> getAlbumUrl(String songUrl) async {
+  final client = http.Client();
+  try {
+    final response = await client.get(Uri.parse(songUrl));
+    if (response.statusCode != 200) {
+      throw Exception('Failed to load song page: ${response.statusCode}');
+    }
+
+    final document = html_parser.parse(response.body);
+    // Locate the paragraph containing the album link
+    final albumParagraph = document.querySelector(
+      'p[align="left"] b a[href*="/game-soundtracks/album/"]',
+    );
+    final albumUrl = albumParagraph?.attributes['href'] ?? '';
+
+    if (albumUrl.isEmpty) {
+      throw Exception('Album URL not found in song page');
+    }
+
+    // Ensure the URL is fully qualified
+    return albumUrl.startsWith('http')
+        ? albumUrl
+        : 'https://downloads.khinsider.com$albumUrl';
+  } catch (e) {
+    debugPrint('Error fetching album URL: $e');
+    rethrow;
+  } finally {
+    client.close();
+  }
+}
+
 Future<List<Playlist>> fetchPlaylists() async {
   final cookies = PreferencesManager.getCookies();
   debugPrint('Fetching playlists with cookies: $cookies');
@@ -331,11 +362,57 @@ class SearchApp extends StatefulWidget {
 
 class _SearchAppState extends State<SearchApp> {
   String _themeMode = 'light';
+  final AppLinks _appLinks = AppLinks();
+  StreamSubscription<Uri>? _linkSubscription;
+  final GlobalKey<_SearchScreenState> _searchScreenKey =
+      GlobalKey<_SearchScreenState>(); // New: GlobalKey
 
   @override
   void initState() {
     super.initState();
     _loadThemePreference();
+    _initDeepLinks();
+  }
+
+  Future<void> _initDeepLinks() async {
+    try {
+      final initialUri = await _appLinks.getInitialLink();
+      if (initialUri != null && mounted) {
+        _handleDeepLink(initialUri);
+      }
+    } catch (e) {
+      debugPrint('Error handling initial deep link: $e');
+    }
+
+    _linkSubscription = _appLinks.uriLinkStream.listen(
+      (Uri? uri) {
+        if (uri != null && mounted) {
+          _handleDeepLink(uri);
+        }
+      },
+      onError: (e) {
+        debugPrint('Error in deep link stream: $e');
+      },
+    );
+  }
+
+  void _handleDeepLink(Uri uri) {
+    // Delegate to SearchScreen via GlobalKey
+    final searchScreenState = _searchScreenKey.currentState;
+    if (searchScreenState != null && mounted) {
+      searchScreenState._handleDeepLink(uri);
+    } else {
+      debugPrint('SearchScreen state not available for deep link: $uri');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unable to process deep link')),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _linkSubscription?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadThemePreference() async {
@@ -353,6 +430,7 @@ class _SearchAppState extends State<SearchApp> {
   }
 
   ThemeData _getThemeData(String themeMode) {
+    // [Existing _getThemeData implementation remains unchanged]
     switch (themeMode) {
       case 'dark':
         return ThemeData.dark().copyWith(
@@ -451,7 +529,10 @@ class _SearchAppState extends State<SearchApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       theme: _getThemeData(_themeMode),
-      home: SearchScreen(onThemeChanged: _updateTheme),
+      home: SearchScreen(
+        key: _searchScreenKey, // Assign GlobalKey
+        onThemeChanged: _updateTheme,
+      ),
     );
   }
 }
@@ -523,6 +604,79 @@ class _SearchScreenState extends State<SearchScreen>
       );
       _savePlaybackState();
     });
+  }
+
+  Future<void> _handleDeepLink(Uri uri) async {
+    debugPrint('SearchScreen handling deep link: $uri');
+    if (uri.host != 'downloads.khinsider.com' ||
+        !uri.path.contains('/game-soundtracks/album/')) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Invalid deep link URL')));
+      return;
+    }
+
+    setState(() {
+      _currentNavIndex = 0;
+      _selectedAlbum = null;
+      _selectedPlaylist = null;
+      _isFavoritesSelected = false;
+      _isSongsLoading = true;
+    });
+
+    try {
+      final songUrl = uri.toString();
+      final albumUrl = await getAlbumUrl(songUrl);
+      await _fetchAlbumPage(albumUrl);
+
+      final decodedSongName = Uri.decodeComponent(
+        uri.pathSegments.last,
+      ).replaceAll('.mp3', '');
+      debugPrint('Decoded song name: $decodedSongName');
+
+      int songIndex = _songs.indexWhere((song) {
+        final mediaItem =
+            (song['audioSource'] as ProgressiveAudioSource).tag as MediaItem;
+        final songFileName = mediaItem.id
+            .split('/')
+            .last
+            .replaceAll('.mp3', '');
+        return Uri.decodeComponent(songFileName) == decodedSongName ||
+            mediaItem.title == decodedSongName;
+      });
+
+      if (songIndex == -1) {
+        final songIndexMatch = RegExp(r'(\d+)\.').firstMatch(decodedSongName);
+        if (songIndexMatch != null) {
+          final index = int.tryParse(songIndexMatch.group(1)!) ?? -1;
+          if (index > 0 && index <= _songs.length) {
+            songIndex = index - 1;
+          }
+        }
+      }
+
+      if (songIndex != -1) {
+        debugPrint('Found song at index $songIndex, playing...');
+        await _playAudioSourceAtIndex(songIndex, false);
+      } else {
+        debugPrint('Song not found in album, playing first song');
+        await _playAudioSourceAtIndex(0, false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not find specific song, playing first track'),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error handling deep link: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to load song from link: $e')),
+      );
+    } finally {
+      setState(() {
+        _isSongsLoading = false;
+      });
+    }
   }
 
   Future<void> _init() async {
@@ -1335,6 +1489,7 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   Future<void> _playAudioSourceAtIndex(int index, bool isFavorites) async {
+    // [Existing _playAudioSourceAtIndex implementation]
     try {
       final songList = isFavorites ? _favorites : _songs;
       if (index >= songList.length || index < 0) {
@@ -1405,10 +1560,16 @@ class _SearchScreenState extends State<SearchScreen>
 
   Future<void> _fetchAlbumPage(String albumUrl) async {
     setState(() {
-      _isSongsLoading = true; // Start loading
+      _isSongsLoading = true;
       debugPrint('Fetching album page: $albumUrl, setting isSongsLoading=true');
     });
-    final fullUrl = 'https://downloads.khinsider.com$albumUrl';
+
+    // Fix: Use albumUrl directly if it's fully qualified, otherwise prepend base URL
+    final fullUrl =
+        albumUrl.startsWith('http')
+            ? albumUrl
+            : 'https://downloads.khinsider.com$albumUrl';
+
     try {
       final response = await _httpClient.get(Uri.parse(fullUrl));
       if (response.statusCode == 200) {
@@ -1423,6 +1584,7 @@ class _SearchScreenState extends State<SearchScreen>
         String year = _selectedAlbum?['year'] ?? '';
         String platform = _selectedAlbum?['platform'] ?? '';
 
+        // [Rest of metadata parsing remains unchanged]
         final metadataParagraph = document.querySelector('p[align="left"]');
         if (metadataParagraph != null) {
           final rawInnerHtml = metadataParagraph.innerHtml;
@@ -1538,7 +1700,7 @@ class _SearchScreenState extends State<SearchScreen>
             'platform': platform,
           };
           _songs = songs;
-          _isSongsLoading = false; // End loading
+          _isSongsLoading = false;
           debugPrint(
             'Album page loaded: ${_songs.length} songs fetched, isSongsLoading=false',
           );
@@ -1546,7 +1708,7 @@ class _SearchScreenState extends State<SearchScreen>
       } else {
         debugPrint('Error: ${response.statusCode}');
         setState(() {
-          _isSongsLoading = false; // End loading on error
+          _isSongsLoading = false;
           debugPrint(
             'Album page fetch failed: status=${response.statusCode}, isSongsLoading=false',
           );
@@ -1556,10 +1718,10 @@ class _SearchScreenState extends State<SearchScreen>
     } catch (e) {
       debugPrint('Error occurred while fetching album page: $e');
       setState(() {
-        _isSongsLoading = false; // End loading on error
+        _isSongsLoading = false;
         debugPrint('Album page fetch error: $e, isSongsLoading=false');
       });
-      throw e;
+      rethrow; // Rethrow to be caught in _handleDeepLink
     }
   }
 
