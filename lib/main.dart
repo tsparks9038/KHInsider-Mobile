@@ -279,7 +279,8 @@ class PreferencesManager {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await JustAudioBackground.init(
-    androidNotificationChannelId: 'com.example.khinsider_android.channel.audio',
+    androidNotificationChannelId:
+        'com.tsparks9038.khinsider_android.channel.audio',
     androidNotificationChannelName: 'Audio Playback',
     androidNotificationOngoing: true,
     androidShowNotificationBadge: true, // Optional: Show notification badge
