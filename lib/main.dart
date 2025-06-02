@@ -625,53 +625,64 @@ class _SearchScreenState extends State<SearchScreen>
     });
 
     try {
-      final songUrl = uri.toString();
-      final albumUrl = await getAlbumUrl(songUrl);
-      await _fetchAlbumPage(albumUrl);
+      // Check if it's a song URL (ends with .mp3) or album URL
+      if (uri.path.endsWith('.mp3')) {
+        // Existing song URL handling
+        final songUrl = uri.toString();
+        final albumUrl = await getAlbumUrl(songUrl);
+        await _fetchAlbumPage(albumUrl);
 
-      final decodedSongName = Uri.decodeComponent(
-        uri.pathSegments.last,
-      ).replaceAll('.mp3', '');
-      debugPrint('Decoded song name: $decodedSongName');
+        final decodedSongName = Uri.decodeComponent(
+          uri.pathSegments.last,
+        ).replaceAll('.mp3', '');
+        debugPrint('Decoded song name: $decodedSongName');
 
-      int songIndex = _songs.indexWhere((song) {
-        final mediaItem =
-            (song['audioSource'] as ProgressiveAudioSource).tag as MediaItem;
-        final songFileName = mediaItem.id
-            .split('/')
-            .last
-            .replaceAll('.mp3', '');
-        return Uri.decodeComponent(songFileName) == decodedSongName ||
-            mediaItem.title == decodedSongName;
-      });
+        int songIndex = _songs.indexWhere((song) {
+          final mediaItem =
+              (song['audioSource'] as ProgressiveAudioSource).tag as MediaItem;
+          final songFileName = mediaItem.id
+              .split('/')
+              .last
+              .replaceAll('.mp3', '');
+          return Uri.decodeComponent(songFileName) == decodedSongName ||
+              mediaItem.title == decodedSongName;
+        });
 
-      if (songIndex == -1) {
-        final songIndexMatch = RegExp(r'(\d+)\.').firstMatch(decodedSongName);
-        if (songIndexMatch != null) {
-          final index = int.tryParse(songIndexMatch.group(1)!) ?? -1;
-          if (index > 0 && index <= _songs.length) {
-            songIndex = index - 1;
+        if (songIndex == -1) {
+          final songIndexMatch = RegExp(r'(\d+)\.').firstMatch(decodedSongName);
+          if (songIndexMatch != null) {
+            final index = int.tryParse(songIndexMatch.group(1)!) ?? -1;
+            if (index > 0 && index <= _songs.length) {
+              songIndex = index - 1;
+            }
           }
         }
-      }
 
-      if (songIndex != -1) {
-        debugPrint('Found song at index $songIndex, playing...');
-        await _playAudioSourceAtIndex(songIndex, false);
+        if (songIndex != -1) {
+          debugPrint('Found song at index $songIndex, playing...');
+          await _playAudioSourceAtIndex(songIndex, false);
+        } else {
+          debugPrint('Song not found in album, playing first song');
+          await _playAudioSourceAtIndex(0, false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Could not find specific song, playing first track',
+              ),
+            ),
+          );
+        }
       } else {
-        debugPrint('Song not found in album, playing first song');
-        await _playAudioSourceAtIndex(0, false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Could not find specific song, playing first track'),
-          ),
-        );
+        // New: Album URL handling
+        final albumUrl = uri.toString();
+        await _fetchAlbumPage(albumUrl);
+        debugPrint('Album loaded from deep link: $albumUrl');
       }
     } catch (e) {
       debugPrint('Error handling deep link: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to load song from link: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to load from link: $e')));
     } finally {
       setState(() {
         _isSongsLoading = false;
