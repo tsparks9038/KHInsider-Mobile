@@ -12,7 +12,6 @@ import 'package:just_audio_background/just_audio_background.dart';
 import 'package:pool/pool.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:app_links/app_links.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -141,7 +140,7 @@ List<Playlist> parsePlaylists(String htmlBody) {
 
         if (cols.length < 3) {
           debugPrint('Skipping row $index: Only ${cols.length} columns');
-          return null;
+          return <String, dynamic>{};
         }
 
         final url =
@@ -168,7 +167,7 @@ List<Playlist> parsePlaylists(String htmlBody) {
 
         if (url.isEmpty || name == 'Unknown') {
           debugPrint('Skipping row $index: Invalid URL or name');
-          return null;
+          return <String, dynamic>{};
         }
 
         return Playlist(
@@ -303,8 +302,6 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   bool _isLoginLoading = false;
-  WebViewController? _webViewController;
-  List<Playlist> _playlists = [];
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
 
@@ -575,7 +572,7 @@ class _SearchScreenState extends State<SearchScreen>
   List<Playlist> _playlists = []; // New: Store playlists
   Playlist? _selectedPlaylist; // New: Track selected playlist
 
-  WebViewController? _webViewController; // Added: Controller for WebView
+  // Added: Controller for WebView
 
   // Add missing controllers
   late final TextEditingController _emailController;
@@ -1175,79 +1172,6 @@ class _SearchScreenState extends State<SearchScreen>
     );
   }
 
-  Future<void> _saveFavorites() async {
-    final favoritesJson = jsonEncode(
-      _favorites.map((song) {
-        final mediaItem =
-            (song['audioSource'] as ProgressiveAudioSource).tag as MediaItem;
-        return {
-          'id': mediaItem.id,
-          'title': mediaItem.title,
-          'album': mediaItem.album,
-          'artist': mediaItem.artist,
-          'artUri': mediaItem.artUri?.toString(),
-          'runtime': song['runtime'],
-          'albumUrl': song['albumUrl'],
-          'index': song['index'],
-          'songPageUrl': song['songPageUrl'],
-        };
-      }).toList(),
-    );
-    await PreferencesManager.setString('favorites', favoritesJson);
-  }
-
-  Future<bool> _validateSession() async {
-    final cookies = PreferencesManager.getCookies();
-    debugPrint('Validating session with cookies: $cookies');
-    if (!PreferencesManager.isLoggedIn()) {
-      debugPrint('Not logged in: missing xf_user or xf_session');
-      return false;
-    }
-
-    final cookieString = cookies.entries
-        .map((e) => '${e.key}=${e.value}')
-        .join('; ');
-    debugPrint('Cookie string: $cookieString');
-    final client = http.Client();
-    try {
-      final response = await client
-          .get(
-            Uri.parse('https://downloads.khinsider.com/playlist/browse'),
-            headers: {
-              'Cookie': cookieString,
-              'User-Agent':
-                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
-              'Accept':
-                  'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-              'Accept-Encoding': 'gzip, deflate, br',
-              'Accept-Language': 'en-US,en;q=0.9',
-            },
-          )
-          .timeout(const Duration(seconds: 5));
-      debugPrint('Session validation status: ${response.statusCode}');
-      debugPrint(
-        'Response body snippet: ${response.body.substring(0, response.body.length > 200 ? 200 : response.body.length)}',
-      );
-
-      final document = html_parser.parse(response.body);
-      final title = document.querySelector('title')?.text.trim();
-      debugPrint('Page title: $title');
-
-      final directory = await getApplicationDocumentsDirectory();
-      final file = File('${directory.path}/session_validation.html');
-      await file.writeAsString(response.body);
-      debugPrint('Saved session validation HTML to ${file.path}');
-
-      return response.statusCode == 200 &&
-          title == 'My Playlists - KHInsider Video Game Music';
-    } catch (e) {
-      debugPrint('Session validation failed: $e');
-      return false;
-    } finally {
-      client.close();
-    }
-  }
-
   Future<void> _loadPlaylists() async {
     setState(() {
       _isLoginLoading = true;
@@ -1301,53 +1225,6 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   // New: Refresh session (dummy implementation, always returns false)
-  Future<bool> _refreshSession() async {
-    final cookies = PreferencesManager.getCookies();
-    if (!PreferencesManager.isLoggedIn()) return false;
-
-    final cookieString = cookies.entries
-        .map((e) => '${e.key}=${e.value}')
-        .join('; ');
-    final dio = Dio();
-    final cookieJar = CookieJar();
-    dio.interceptors.add(CookieManager(cookieJar));
-
-    try {
-      dio.options.headers = {
-        'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
-        'Accept':
-            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Cookie': cookieString,
-      };
-
-      final response = await dio
-          .get('https://downloads.khinsider.com/')
-          .timeout(const Duration(seconds: 5));
-      if (response.statusCode != 200) return false;
-
-      final newCookies = await cookieJar.loadForRequest(
-        Uri.parse('https://downloads.khinsider.com/'),
-      );
-      final cookieMap = {
-        for (var cookie in newCookies) cookie.name: cookie.value,
-      };
-      if (cookieMap.containsKey('xf_user') &&
-          cookieMap.containsKey('xf_session')) {
-        await PreferencesManager.setCookies(cookieMap);
-        debugPrint('Session refreshed with cookies: $cookieMap');
-        return true;
-      }
-      return false;
-    } catch (e) {
-      debugPrint('Session refresh failed: $e');
-      return false;
-    } finally {
-      dio.close();
-    }
-  }
 
   // New: Fetch songs from a playlist
   Future<void> _fetchPlaylistSongs(String playlistUrl) async {
@@ -1415,8 +1292,8 @@ class _SearchScreenState extends State<SearchScreen>
 
         // Extract album name from the small font link
         final albumLink = titleCell.querySelectorAll('a')[1];
-        final albumName = albumLink?.text.trim() ?? 'Unknown Album';
-        final albumUrl = albumLink?.attributes['href'] ?? '';
+        final albumName = albumLink.text.trim();
+        final albumUrl = albumLink.attributes['href'] ?? '';
 
         final runtimeCell = cells[4];
         final runtime = runtimeCell.text.trim();
@@ -1484,7 +1361,7 @@ class _SearchScreenState extends State<SearchScreen>
                 })
                 .catchError((e) {
                   debugPrint('Error fetching song: $e');
-                  return null;
+                  return <String, dynamic>{};
                 }),
           ),
         );
@@ -1788,34 +1665,6 @@ class _SearchScreenState extends State<SearchScreen>
 
   String _getHighResImageUrl(String url) {
     return url.replaceFirst('/thumbs/', '/');
-  }
-
-  void _toggleFavorite(Map<String, dynamic> song) {
-    setState(() {
-      final mediaItem =
-          (song['audioSource'] as ProgressiveAudioSource).tag as MediaItem;
-      if (_favorites.any(
-        (fav) =>
-            (fav['audioSource'] as ProgressiveAudioSource).tag.id ==
-            mediaItem.id,
-      )) {
-        _favorites.removeWhere(
-          (fav) =>
-              (fav['audioSource'] as ProgressiveAudioSource).tag.id ==
-              mediaItem.id,
-        );
-      } else {
-        _favorites.add(song);
-      }
-    });
-    _saveFavorites();
-  }
-
-  bool _isFavorited(MediaItem mediaItem) {
-    return _favorites.any(
-      (fav) =>
-          (fav['audioSource'] as ProgressiveAudioSource).tag.id == mediaItem.id,
-    );
   }
 
   void _shareAlbum(String albumUrl) {
@@ -2218,7 +2067,7 @@ class _SearchScreenState extends State<SearchScreen>
           .timeout(const Duration(seconds: 10));
 
       debugPrint('Toggle playlist status: ${response.statusCode}');
-      final document = html_parser.parse(response.body);
+      html_parser.parse(response.body);
       // final title = document.querySelector('title')?.text.trim();
       // debugPrint('Create playlist page title: $title');
 
@@ -2639,7 +2488,7 @@ class _SearchScreenState extends State<SearchScreen>
                   ),
                 const SizedBox(height: 20),
                 Text(
-                  song.title ?? 'Unknown',
+                  song.title,
                   style: const TextStyle(
                     fontSize: 20,
                     fontWeight: FontWeight.bold,
@@ -2824,7 +2673,7 @@ class _SearchScreenState extends State<SearchScreen>
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      song.title ?? 'Playing...',
+                      song.title,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 16),
                     ),
@@ -3222,7 +3071,7 @@ Future<List<Map<String, dynamic>>> parseSongList(
             })
             .catchError((e) {
               debugPrint('Error fetching MP3 URL for $name: $e');
-              return null;
+              return <String, dynamic>{};
             }),
       ),
     );
