@@ -777,7 +777,9 @@ class _SearchScreenState extends State<SearchScreen>
   Future<void> _performLogin() async {
     if (_emailController.text.isEmpty || _passwordController.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter both email and password')),
+        const SnackBar(
+          content: Text('Please enter both email/name and password'),
+        ),
       );
       return;
     }
@@ -2441,7 +2443,7 @@ class _SearchScreenState extends State<SearchScreen>
               TextField(
                 controller: _emailController,
                 decoration: const InputDecoration(
-                  labelText: 'Email',
+                  labelText: 'Your name or email address',
                   border: OutlineInputBorder(),
                 ),
                 keyboardType: TextInputType.emailAddress,
