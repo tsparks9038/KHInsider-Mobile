@@ -683,12 +683,10 @@ class _SearchScreenState extends State<SearchScreen>
           debugPrint('Album loaded from deep link: $albumUrl');
         }
       } else if (uri.path.contains('/playlist/')) {
-        // New: Playlist URL handling
         setState(() {
           _currentNavIndex = 1;
         });
 
-        // Fetch playlist page to extract name and image URL
         final playlistUrl = uri.toString();
         final response = await _httpClient.get(Uri.parse(playlistUrl));
         if (response.statusCode != 200) {
@@ -698,19 +696,25 @@ class _SearchScreenState extends State<SearchScreen>
         }
 
         final document = html_parser.parse(response.body);
+        // Extract playlist name from #playlistTitle and remove "Playlist: " prefix
+        final rawPlaylistName =
+            document.querySelector('#playlistTitle')?.text.trim() ??
+            'Unknown Playlist';
         final playlistName =
-            document.querySelector('h2')?.text.trim() ?? 'Unknown Playlist';
+            rawPlaylistName.startsWith('Playlist: ')
+                ? rawPlaylistName.substring('Playlist: '.length).trim()
+                : rawPlaylistName;
+
         final imageUrl =
             document
                 .querySelector('.albumImage img')
                 ?.attributes['src']
                 ?.trim();
 
-        // Create temporary Playlist object
         final playlist = Playlist(
           name: playlistName,
-          url: uri.path, // Use path to match _fetchPlaylistSongs expectation
-          songCount: 0, // Placeholder, not critical for display
+          url: uri.path,
+          songCount: 0,
           imageUrl: imageUrl,
         );
 
@@ -1233,15 +1237,10 @@ class _SearchScreenState extends State<SearchScreen>
     });
 
     try {
-      final cookies = PreferencesManager.getCookies();
-      final cookieString = cookies.entries
-          .map((e) => '${e.key}=${e.value}')
-          .join('; ');
-
+      // Fetch playlist page without cookies for public access
       final response = await _httpClient.get(
         Uri.parse('https://downloads.khinsider.com$playlistUrl'),
         headers: {
-          'Cookie': cookieString,
           'User-Agent':
               'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
         },
@@ -1251,57 +1250,66 @@ class _SearchScreenState extends State<SearchScreen>
         throw Exception('Failed to load playlist: ${response.statusCode}');
       }
 
+      // Save HTML for debugging
+      final directory = await getApplicationDocumentsDirectory();
+      final file = File(
+        '${directory.path}/playlist_${playlistUrl.replaceAll('/', '_')}.html',
+      );
+      await file.writeAsString(response.body);
+      debugPrint('Saved playlist HTML to ${file.path}');
+
       final document = html_parser.parse(response.body);
       final songRows = document.querySelectorAll('#songlist tr');
 
-      if (songRows.isEmpty) {
-        debugPrint('No rows found in #songlist');
+      if (songRows.length < 3) {
+        debugPrint('Not enough rows in #songlist: ${songRows.length}');
         throw Exception('No songs found in playlist');
       }
+
+      debugPrint('Total rows in #songlist: ${songRows.length}');
 
       final List<Map<String, dynamic>> songs = [];
       final List<Future<Map<String, dynamic>?>> futures = [];
       final pool = Pool(Platform.numberOfProcessors);
 
-      for (var i = 0; i < songRows.length; i++) {
+      // Process all rows except first (header) and last (footer)
+      for (var i = 1; i < songRows.length - 1; i++) {
         final row = songRows[i];
-        if (row.id == 'songlist_header' || row.id == 'songlist_footer') {
-          debugPrint('Skipping row $i: Header or footer row');
-          continue;
-        }
+        debugPrint('Processing row $i: ${row.outerHtml.substring(0, 50)}...');
 
         final cells = row.querySelectorAll('td');
-        if (cells.length < 8) {
-          debugPrint('Skipping row $i: Only ${cells.length} cells found');
+        if (cells.length != 7) {
+          debugPrint(
+            'Skipping row $i: Expected 7 cells, found ${cells.length}',
+          );
           continue;
         }
 
+        // Extract title and song URL (cells[3], first <a>)
         final titleCell = cells[3];
         final titleLink = titleCell.querySelector('a');
-        if (titleLink == null) {
-          debugPrint('Skipping row $i: No title link found');
-          continue;
-        }
-
-        final name = titleLink.text.trim();
-        final href = titleLink.attributes['href'];
+        final name = titleLink?.text.trim() ?? '';
+        final href = titleLink?.attributes['href'];
         if (href == null || name.isEmpty) {
-          debugPrint('Skipping row $i: Missing href or name');
+          debugPrint('Skipping row $i: Missing title or href');
           continue;
         }
 
-        // Extract album name from the small font link
-        final albumLink = titleCell.querySelectorAll('a')[1];
-        final albumName = albumLink.text.trim();
-        final albumUrl = albumLink.attributes['href'] ?? '';
+        // Extract album name and URL (cells[3], second <a>)
+        final albumLinks = titleCell.querySelectorAll('a');
+        final albumLink = albumLinks.length > 1 ? albumLinks[1] : null;
+        final albumName = albumLink?.text.trim() ?? 'Unknown Album';
+        final albumUrl = albumLink?.attributes['href'] ?? '';
 
+        // Extract runtime (cells[4], <a> text)
         final runtimeCell = cells[4];
-        final runtime = runtimeCell.text.trim();
-        if (runtime.isEmpty || !RegExp(r'^\d+:\d{2}$').hasMatch(runtime)) {
+        final runtime = runtimeCell.querySelector('a')?.text.trim() ?? '';
+        if (!RegExp(r'^\d+:\d{2}$').hasMatch(runtime) && runtime != '0:45') {
           debugPrint('Skipping row $i: Invalid runtime format "$runtime"');
           continue;
         }
 
+        // Extract album art (cells[2], <img src>)
         final albumIconCell = cells[2];
         final albumArtImg = albumIconCell.querySelector('img');
         final albumArtUrl = albumArtImg?.attributes['src']?.replaceFirst(
@@ -1309,7 +1317,11 @@ class _SearchScreenState extends State<SearchScreen>
           '/',
         );
 
-        final songId = row.attributes['songid'];
+        // Extract song ID (row or .playlistAddTo)
+        final songId =
+            row.attributes['songid'] ??
+            row.querySelector('.playlistAddTo')?.attributes['songid'];
+
         final songPageUrl = 'https://downloads.khinsider.com$href';
 
         futures.add(
@@ -1321,30 +1333,21 @@ class _SearchScreenState extends State<SearchScreen>
                     Uri.parse(mp3Url),
                     tag: MediaItem(
                       id: mp3Url,
-                      title:
-                          name.isNotEmpty
-                              ? name
-                              : 'Unknown Song', // Ensure non-empty title
-                      album:
-                          albumName.isNotEmpty
-                              ? albumName
-                              : 'Unknown Album', // Ensure non-empty album
+                      title: name.isNotEmpty ? name : 'Unknown Song',
+                      album: albumName.isNotEmpty ? albumName : 'Unknown Album',
                       artist:
-                          albumName.isNotEmpty
-                              ? albumName
-                              : 'Unknown Artist', // Ensure non-empty artist
+                          albumName.isNotEmpty ? albumName : 'Unknown Artist',
                       artUri:
                           albumArtUrl!.isNotEmpty
                               ? Uri.parse(albumArtUrl)
-                              : null, // Optional artwork
+                              : null,
                       duration:
-                          runtime.isNotEmpty &&
-                                  RegExp(r'^\d+:\d{2}$').hasMatch(runtime)
+                          runtime.isNotEmpty
                               ? Duration(
                                 minutes: int.parse(runtime.split(':')[0]),
                                 seconds: int.parse(runtime.split(':')[1]),
                               )
-                              : null, // Optional: Add duration if available
+                              : null,
                     ),
                   );
                   return {
@@ -1373,8 +1376,7 @@ class _SearchScreenState extends State<SearchScreen>
       setState(() {
         _songs = songs;
         _selectedAlbum = {
-          'albumName':
-              _selectedPlaylist!.name, // Still show playlist name as header
+          'albumName': _selectedPlaylist!.name,
           'albumUrl': playlistUrl,
           'imageUrl':
               _selectedPlaylist!.imageUrl?.replaceFirst(
@@ -1393,6 +1395,14 @@ class _SearchScreenState extends State<SearchScreen>
         );
         _isSongsLoading = false;
       });
+
+      debugPrint('Parsed ${songs.length} songs from playlist');
+      if (songs.isEmpty) {
+        debugPrint('Warning: No valid songs parsed from playlist');
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No valid songs found in playlist')),
+        );
+      }
     } catch (e) {
       debugPrint('Error fetching playlist songs: $e');
       setState(() {
