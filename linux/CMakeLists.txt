@@ -69,6 +69,8 @@ set_target_properties(${BINARY_NAME}
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/intermediates_do_not_run"
 )
 
+# just_audio memory leak fix
+target_link_libraries(${BINARY_NAME} PRIVATE ${MIMALLOC_LIB})
 
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.

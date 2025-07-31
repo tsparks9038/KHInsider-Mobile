@@ -9,6 +9,7 @@ import 'package:html/parser.dart' as html_parser;
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
+import 'package:just_audio_media_kit/just_audio_media_kit.dart';
 import 'package:pool/pool.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider/path_provider.dart';
@@ -286,6 +287,7 @@ Future<void> main() async {
     androidNotificationIcon:
         'mipmap/ic_launcher', // Ensure you have a proper icon
   );
+  JustAudioMediaKit.ensureInitialized();
   await PreferencesManager.init();
   debugPrint('SharedPreferences initialized');
   runApp(const SearchApp());

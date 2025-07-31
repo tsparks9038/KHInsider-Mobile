@@ -32,6 +32,8 @@ dependencies:
     sdk: flutter
   just_audio: ^0.9.40 # Ensure latest version
   just_audio_background: ^0.0.1-beta.16 # Latest version at the time of writing
+  just_audio_media_kit: any
+  media_kit_libs_linux: any
   http: ^1.2.2
   html: ^0.15.4
   shared_preferences: ^2.3.0
