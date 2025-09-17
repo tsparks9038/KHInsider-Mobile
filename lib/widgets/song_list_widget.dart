@@ -10,13 +10,13 @@ class SongListWidget extends StatelessWidget {
   final void Function(Map<String, dynamic>) onShareSong;
 
   const SongListWidget({
-    Key? key,
+    super.key,
     required this.selectedAlbum,
     required this.songs,
     required this.onSongTap,
     required this.onAddToPlaylist,
     required this.onShareSong,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {

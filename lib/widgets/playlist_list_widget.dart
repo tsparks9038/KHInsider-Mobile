@@ -14,7 +14,7 @@ class PlaylistListWidget extends StatelessWidget {
   final void Function()? onPerformLogin;
 
   const PlaylistListWidget({
-    Key? key,
+    super.key,
     required this.isLoggedIn,
     required this.isLoading,
     required this.playlists,
@@ -25,7 +25,7 @@ class PlaylistListWidget extends StatelessWidget {
     required this.emailController,
     required this.passwordController,
     this.onPerformLogin,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {

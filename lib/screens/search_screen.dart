@@ -1087,8 +1087,9 @@ class SearchScreenState extends State<SearchScreen>
             );
             final match = regex.firstMatch(metaDescription);
             if (match != null) {
-              if (platform.isEmpty)
+              if (platform.isEmpty) {
                 platform = match.group(1)?.trim() ?? platform;
+              }
               if (type.isEmpty) type = match.group(2)?.trim() ?? type;
               if (year.isEmpty) year = match.group(3)?.trim() ?? year;
               debugPrint(
@@ -1194,7 +1195,7 @@ class SearchScreenState extends State<SearchScreen>
   Future<List<Map<String, dynamic>>> _fetchPlaylistPopup(String songId) async {
     final client = http.Client();
     try {
-      final cookies = await PreferencesManager.getCookies();
+      final cookies = PreferencesManager.getCookies();
       if (cookies.isEmpty) {
         debugPrint('Error: No cookies found in PreferencesManager');
         throw Exception('No authentication cookies available');

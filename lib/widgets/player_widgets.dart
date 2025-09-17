@@ -18,7 +18,7 @@ class ExpandedPlayer extends StatelessWidget {
   final String Function(Duration) formatDuration;
 
   const ExpandedPlayer({
-    Key? key,
+    super.key,
     required this.song,
     required this.player,
     required this.onCollapse,
@@ -32,7 +32,7 @@ class ExpandedPlayer extends StatelessWidget {
     required this.loopMode,
     required this.canAddToPlaylist,
     required this.formatDuration,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -188,14 +188,14 @@ class MiniPlayer extends StatelessWidget {
   final bool canAddToPlaylist;
 
   const MiniPlayer({
-    Key? key,
+    super.key,
     required this.song,
     required this.player,
     required this.onExpand,
     required this.onPlayPause,
     this.onAddToPlaylist,
     required this.canAddToPlaylist,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {

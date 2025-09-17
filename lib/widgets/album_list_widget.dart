@@ -8,13 +8,13 @@ class AlbumListWidget extends StatelessWidget {
   final void Function(Map<String, String>) onAlbumTap;
 
   const AlbumListWidget({
-    Key? key,
+    super.key,
     required this.albums,
     required this.selectedType,
     required this.albumTypes,
     required this.onTypeChanged,
     required this.onAlbumTap,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
