@@ -1,0 +1,2391 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:html/dom.dart' as html_parser;
+import 'package:html/parser.dart' as html_parser;
+import 'package:http/http.dart' as http;
+import 'package:just_audio/just_audio.dart';
+import 'package:just_audio_background/just_audio_background.dart';
+import 'package:khinsider_android/models/models.dart';
+import 'package:khinsider_android/screens/settings_screen.dart';
+import 'package:khinsider_android/services/api_service.dart';
+import 'package:khinsider_android/services/preferences_manager.dart';
+import 'package:dio/dio.dart';
+import 'package:cookie_jar/cookie_jar.dart';
+import 'package:dio_cookie_manager/dio_cookie_manager.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:pool/pool.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+class SearchScreen extends StatefulWidget {
+  final Function(String) onThemeChanged;
+
+  const SearchScreen({super.key, required this.onThemeChanged});
+
+  @override
+  State<SearchScreen> createState() => SearchScreenState();
+}
+
+class SearchScreenState extends State<SearchScreen>
+    with WidgetsBindingObserver {
+  final TextEditingController _searchController = TextEditingController();
+  final http.Client _httpClient = http.Client();
+  final AudioPlayer _player = AudioPlayer();
+  late final ValueNotifier<SongState> _songState;
+  bool _isPlayerExpanded = false;
+  bool _isShuffleEnabled = false;
+  LoopMode _loopMode = LoopMode.off;
+  List<Map<String, String>> _albums = [];
+  ConcatenatingAudioSource? _playlist;
+  List<Map<String, dynamic>> _songs = [];
+  Map<String, String>? _selectedAlbum;
+  List<Map<String, dynamic>> _favorites = [];
+  int _currentNavIndex = 0;
+  bool _isFavoritesSelected = false;
+  List<String> _albumTypes = ['All'];
+  String _selectedType = 'All';
+  List<Playlist> _playlists = []; // New: Store playlists
+  Playlist? _selectedPlaylist; // New: Track selected playlist
+
+  // Added: Controller for WebView
+
+  // Add missing controllers
+  late final TextEditingController _emailController;
+  late final TextEditingController _passwordController;
+
+  // Add missing variable for login loading state
+  bool _isLoginLoading = false;
+  bool _isSongsLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _songState = ValueNotifier<SongState>(SongState(0, null));
+    _emailController = TextEditingController();
+    _passwordController = TextEditingController();
+    WidgetsBinding.instance.addObserver(this);
+    _init();
+    _player.sequenceStateStream.listen((state) {
+      if (state == null || _playlist == null) return;
+      final index = state.currentIndex;
+      _songState.value = SongState(
+        index,
+        index < _playlist!.children.length
+            ? (_playlist!.children[index] as ProgressiveAudioSource).uri
+                .toString()
+            : null,
+      );
+      _savePlaybackState();
+    });
+  }
+
+  Future<void> handleDeepLink(Uri uri) async {
+    debugPrint('SearchScreen handling deep link: $uri');
+    if (uri.host != 'downloads.khinsider.com') {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Invalid deep link URL')));
+      return;
+    }
+
+    setState(() {
+      _selectedAlbum = null;
+      _selectedPlaylist = null;
+      _isFavoritesSelected = false;
+      _isSongsLoading = true;
+    });
+
+    try {
+      if (uri.path.contains('/game-soundtracks/album/')) {
+        // Existing album and song URL handling
+        setState(() {
+          _currentNavIndex = 0;
+        });
+
+        if (uri.path.endsWith('.mp3')) {
+          // Song URL handling
+          final songUrl = uri.toString();
+          final albumUrl = await getAlbumUrl(songUrl);
+          await _fetchAlbumPage(albumUrl);
+
+          final decodedSongName = Uri.decodeComponent(
+            uri.pathSegments.last,
+          ).replaceAll('.mp3', '');
+          debugPrint('Decoded song name: $decodedSongName');
+
+          int songIndex = _songs.indexWhere((song) {
+            final mediaItem =
+                (song['audioSource'] as ProgressiveAudioSource).tag
+                    as MediaItem;
+            final songFileName = mediaItem.id
+                .split('/')
+                .last
+                .replaceAll('.mp3', '');
+            return Uri.decodeComponent(songFileName) == decodedSongName ||
+                mediaItem.title == decodedSongName;
+          });
+
+          if (songIndex == -1) {
+            final songIndexMatch = RegExp(
+              r'(\d+)\.',
+            ).firstMatch(decodedSongName);
+            if (songIndexMatch != null) {
+              final index = int.tryParse(songIndexMatch.group(1)!) ?? -1;
+              if (index > 0 && index <= _songs.length) {
+                songIndex = index - 1;
+              }
+            }
+          }
+
+          if (songIndex != -1) {
+            debugPrint('Found song at index $songIndex, playing...');
+            await _playAudioSourceAtIndex(songIndex, false);
+          } else {
+            debugPrint('Song not found in album, playing first song');
+            await _playAudioSourceAtIndex(0, false);
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'Could not find specific song, playing first track',
+                ),
+              ),
+            );
+          }
+        } else {
+          // Album URL handling
+          final albumUrl = uri.toString();
+          await _fetchAlbumPage(albumUrl);
+          debugPrint('Album loaded from deep link: $albumUrl');
+        }
+      } else if (uri.path.contains('/playlist/')) {
+        setState(() {
+          _currentNavIndex = 1;
+        });
+
+        final playlistUrl = uri.toString();
+        final response = await _httpClient.get(Uri.parse(playlistUrl));
+        if (response.statusCode != 200) {
+          throw Exception(
+            'Failed to load playlist page: ${response.statusCode}',
+          );
+        }
+
+        final document = html_parser.parse(response.body);
+        // Extract playlist name from #playlistTitle and remove "Playlist: " prefix
+        final rawPlaylistName =
+            document.querySelector('#playlistTitle')?.text.trim() ??
+            'Unknown Playlist';
+        final playlistName =
+            rawPlaylistName.startsWith('Playlist: ')
+                ? rawPlaylistName.substring('Playlist: '.length).trim()
+                : rawPlaylistName;
+
+        final imageUrl =
+            document
+                .querySelector('.albumImage img')
+                ?.attributes['src']
+                ?.trim();
+
+        final playlist = Playlist(
+          name: playlistName,
+          url: uri.path,
+          songCount: 0,
+          imageUrl: imageUrl,
+        );
+
+        setState(() {
+          _selectedPlaylist = playlist;
+        });
+
+        await _fetchPlaylistSongs(playlist.url);
+        debugPrint('Playlist loaded from deep link: $playlistUrl');
+      } else {
+        throw Exception('Unsupported deep link URL');
+      }
+    } catch (e) {
+      debugPrint('Error handling deep link: $e');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to load from link: $e')));
+    } finally {
+      setState(() {
+        _isSongsLoading = false;
+      });
+    }
+  }
+
+  Future<void> _init() async {
+    await _loadPreferences();
+    await _loadFavorites();
+    await _restorePlaybackState();
+    debugPrint('Is logged in: ${PreferencesManager.isLoggedIn()}');
+    if (PreferencesManager.getCookies().isNotEmpty) {
+      try {
+        await _loadPlaylists();
+      } catch (e) {
+        debugPrint('Failed to load playlists on init: $e');
+        setState(() {
+          _playlists = [];
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _player.dispose();
+    _httpClient.close();
+    _searchController.dispose();
+    _emailController.dispose();
+    _passwordController.dispose();
+    _songState.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      _savePlaybackState();
+    }
+  }
+
+  Future<void> _performLogin() async {
+    if (_emailController.text.isEmpty || _passwordController.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please enter both email/name and password'),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _isLoginLoading = true);
+    final dio = Dio();
+    final cookieJar = CookieJar();
+    dio.interceptors.add(CookieManager(cookieJar));
+
+    try {
+      dio.options.headers = {
+        'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept':
+            'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Origin': 'https://downloads.khinsider.com',
+        'Referer': 'https://downloads.khinsider.com/forums/login',
+        'DNT': '1',
+      };
+
+      debugPrint('Step 1: Getting CSRF token...');
+      const loginUrl = 'https://downloads.khinsider.com/forums/login';
+      final getResponse = await dio
+          .get(loginUrl)
+          .timeout(const Duration(seconds: 10));
+
+      if (getResponse.statusCode != 200) {
+        debugPrint(
+          'Error getting login page: Status ${getResponse.statusCode}',
+        );
+        throw Exception('Failed to load login page: ${getResponse.statusCode}');
+      }
+
+      final doc = html_parser.parse(getResponse.data);
+      final xfToken = doc.querySelector('input[name="_xfToken"]');
+      if (xfToken == null || xfToken.attributes['value'] == null) {
+        debugPrint('Error getting token: No _xfToken found');
+        throw Exception('Missing _xfToken from login page');
+      }
+
+      debugPrint('Step 2: Logging in...');
+      const postUrl =
+          'https://downloads.khinsider.com/forums/index.php?login/login';
+      dio.options.headers['Referer'] = loginUrl;
+      dio.options.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+
+      final loginData = {
+        '_xfToken': xfToken.attributes['value'],
+        'login': _emailController.text.trim(),
+        'password': _passwordController.text,
+        'remember': '1',
+        '_xfRedirect': 'https://downloads.khinsider.com/playlist/browse',
+      };
+
+      final postResponse = await dio
+          .post(
+            postUrl,
+            data: loginData,
+            options: Options(
+              followRedirects: false,
+              validateStatus:
+                  (status) => status != null && status >= 200 && status < 400,
+            ),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (postResponse.statusCode != 302 && postResponse.statusCode != 303) {
+        debugPrint('❌ Login failed: Status ${postResponse.statusCode}');
+        throw Exception(
+          'Login failed: did not redirect (status ${postResponse.statusCode})',
+        );
+      }
+
+      final location = postResponse.headers.value('location');
+      if (location == null) {
+        debugPrint('No redirect location found');
+        throw Exception('No redirect location found');
+      }
+
+      final redirectUri =
+          location.startsWith('https://')
+              ? Uri.parse(location)
+              : Uri.parse('https://downloads.khinsider.com$location');
+
+      debugPrint('Trying to load playlist page...');
+      dio.options.headers['Referer'] =
+          'https://downloads.khinsider.com/playlist/';
+      final finalResponse = await dio
+          .get(redirectUri.toString())
+          .timeout(const Duration(seconds: 10));
+
+      if (finalResponse.statusCode != 200) {
+        debugPrint(
+          'Failed to load playlist: Status code ${finalResponse.statusCode}',
+        );
+        throw Exception('Failed to load playlist: ${finalResponse.statusCode}');
+      }
+
+      final finalDoc = html_parser.parse(finalResponse.data);
+      if (finalDoc.querySelector('a[href*="members"]') == null) {
+        debugPrint('Login verification failed');
+        await PreferencesManager.clearCookies();
+        throw Exception('Login verification failed: User menu not found');
+      }
+
+      final cookies = await cookieJar.loadForRequest(redirectUri);
+      final cookieMap = {for (var cookie in cookies) cookie.name: cookie.value};
+      if (!cookieMap.containsKey('xf_user') ||
+          !cookieMap.containsKey('xf_session')) {
+        debugPrint('Missing required cookies: xf_user or xf_session');
+        await PreferencesManager.clearCookies();
+        throw Exception('Login failed: Missing required cookies');
+      }
+      await PreferencesManager.setCookies(cookieMap);
+      debugPrint('Saved cookies: $cookieMap');
+      debugPrint(
+        'Retrieved cookies after save: ${PreferencesManager.getCookies()}',
+      );
+
+      final playlists = parsePlaylists(finalResponse.data);
+      if (playlists.isEmpty) {
+        debugPrint('No playlists found');
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('No playlists found')));
+      } else {
+        debugPrint('Playlists:');
+        for (var playlist in playlists) {
+          debugPrint(
+            '- ${playlist.name} (${playlist.songCount} tracks) - https://downloads.khinsider${playlist.url}',
+          );
+        }
+      }
+
+      setState(() {
+        _playlists = playlists;
+        _emailController.clear();
+        _passwordController.clear();
+        _isLoginLoading = false;
+      });
+
+      debugPrint('✅ Login successful, playlists loaded');
+    } catch (e) {
+      debugPrint('Login error: $e');
+      await PreferencesManager.clearCookies();
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Login failed: $e')));
+      }
+      setState(() => _isLoginLoading = false);
+    } finally {
+      dio.close();
+    }
+  }
+
+  Future<void> _savePlaybackState() async {
+    final currentSongUrl = _songState.value.url;
+    if (currentSongUrl == null || _playlist == null) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    debugPrint('All SharedPreferences keys: ${prefs.getKeys()}');
+
+    await prefs.setString('currentSongUrl', currentSongUrl);
+    await prefs.setInt('currentSongIndex', _songState.value.index);
+    await prefs.setBool('isFavoritesSelected', _isFavoritesSelected);
+    await prefs.setInt('playbackPosition', _player.position.inSeconds);
+
+    final songList = _isFavoritesSelected ? _favorites : _songs;
+    final songsJson = jsonEncode(
+      songList.map((song) {
+        final mediaItem =
+            (song['audioSource'] as ProgressiveAudioSource).tag as MediaItem;
+        return {
+          'id': mediaItem.id,
+          'title': mediaItem.title,
+          'album': mediaItem.album,
+          'artist': mediaItem.artist,
+          'artUri': mediaItem.artUri?.toString(),
+          'runtime': song['runtime'],
+          'albumUrl': song['albumUrl'],
+          'index': song['index'],
+          'songPageUrl': song['songPageUrl'],
+        };
+      }).toList(),
+    );
+    await prefs.setString('playlistSongs', songsJson);
+  }
+
+  Future<void> _restorePlaybackState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final currentSongUrl = prefs.getString('currentSongUrl');
+    if (currentSongUrl == null) {
+      debugPrint('No playback state to restore');
+      return;
+    }
+
+    final currentSongIndex = prefs.getInt('currentSongIndex') ?? 0;
+    final isFavoritesSelected = prefs.getBool('isFavoritesSelected') ?? false;
+    final playbackPosition = prefs.getInt('playbackPosition') ?? 0;
+    final songsJson = prefs.getString('playlistSongs');
+
+    if (songsJson == null) {
+      debugPrint('No playlist songs saved');
+      return;
+    }
+
+    try {
+      final List<dynamic> songsList = jsonDecode(songsJson);
+      final restoredSongs =
+          songsList.map((item) {
+            final map = item as Map<String, dynamic>;
+            if (!map.containsKey('id') || !map.containsKey('title')) {
+              throw FormatException('Invalid song data: $map');
+            }
+            final mediaItem = MediaItem(
+              id: map['id'],
+              title: map['title'],
+              album: map['album'],
+              artist: map['artist'],
+              artUri: map['artUri'] != null ? Uri.parse(map['artUri']) : null,
+            );
+            return {
+              'audioSource': ProgressiveAudioSource(
+                Uri.parse(map['id']),
+                tag: mediaItem,
+              ),
+              'runtime': map['runtime'] ?? 'Unknown',
+              'albumUrl': map['albumUrl'] ?? '',
+              'index': map['index'] ?? 0,
+              'songPageUrl': map['songPageUrl'] ?? '',
+            };
+          }).toList();
+
+      setState(() {
+        _isFavoritesSelected = isFavoritesSelected;
+        _playlist = ConcatenatingAudioSource(
+          children:
+              restoredSongs
+                  .map((song) => song['audioSource'] as AudioSource)
+                  .toList(),
+        );
+        _selectedAlbum = null;
+      });
+
+      debugPrint(
+        'Restored playback: index=$currentSongIndex, url=$currentSongUrl, isFavorites=$isFavoritesSelected, songCount=${restoredSongs.length}',
+      );
+
+      _songState.value = SongState(currentSongIndex, currentSongUrl);
+
+      try {
+        await _player.setAudioSource(
+          _playlist!,
+          initialIndex: currentSongIndex,
+        );
+        await _player.seek(Duration(seconds: playbackPosition));
+      } catch (e) {
+        debugPrint('Error setting audio source: $e');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to restore playback queue: $e')),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error restoring playback state: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to restore playback queue: $e')),
+      );
+    }
+  }
+
+  Future<Map<String, String>> _parseSongPage(String songPageUrl) async {
+    final response = await _httpClient.get(Uri.parse(songPageUrl));
+    if (response.statusCode != 200) {
+      throw Exception('Failed to load song page: ${response.statusCode}');
+    }
+
+    final document = html_parser.parse(response.body);
+    final mp3Url = await fetchActualMp3UrlStatic(songPageUrl);
+
+    final albumLink = document.querySelector(
+      'a[href*="/game-soundtracks/album/"]',
+    );
+    final albumUrl = albumLink?.attributes['href'] ?? '';
+    final fullAlbumUrl =
+        albumUrl.isNotEmpty ? 'https://downloads.khinsider.com$albumUrl' : '';
+
+    final songNameElement = document.querySelector('p b')?.parent;
+    final songName =
+        songNameElement != null && songNameElement.text.contains('Song name')
+            ? songNameElement.querySelector('b')?.text ?? 'Unknown'
+            : 'Unknown';
+
+    final albumNameElement =
+        document
+            .querySelectorAll('p b')
+            .asMap()
+            .entries
+            .firstWhere(
+              (entry) =>
+                  entry.value.parent?.text.contains('Album name') ?? false,
+              orElse: () => MapEntry(-1, document.createElement('b')),
+            )
+            .value;
+    final albumName =
+        albumNameElement.parent!.text.contains('Album name')
+            ? albumNameElement.text
+            : 'Unknown';
+
+    return {
+      'mp3Url': mp3Url,
+      'albumUrl': fullAlbumUrl,
+      'songName': songName,
+      'albumName': albumName,
+      'songPageUrl': songPageUrl,
+    };
+  }
+
+  Future<void> _loadPreferences() async {
+    final shuffleEnabled =
+        PreferencesManager.getBool('shuffleEnabled') ?? false;
+    final loopModeString = PreferencesManager.getString('loopMode') ?? 'off';
+    final loopMode =
+        {
+          'off': LoopMode.off,
+          'one': LoopMode.one,
+          'all': LoopMode.all,
+        }[loopModeString] ??
+        LoopMode.off;
+
+    setState(() {
+      _isShuffleEnabled = shuffleEnabled;
+      _loopMode = loopMode;
+    });
+
+    await _player.setShuffleModeEnabled(shuffleEnabled);
+    await _player.setLoopMode(loopMode);
+  }
+
+  Future<void> _loadFavorites() async {
+    final favoritesJson = PreferencesManager.getString('favorites');
+    if (favoritesJson != null) {
+      try {
+        final List<dynamic> favoritesList = jsonDecode(favoritesJson);
+        setState(() {
+          _favorites =
+              favoritesList.map((item) {
+                final map = item as Map<String, dynamic>;
+                final mediaItem = MediaItem(
+                  id: map['id'],
+                  title: map['title'],
+                  album: map['album'],
+                  artist: map['artist'],
+                  artUri:
+                      map['artUri'] != null
+                          ? Uri.parse(
+                            (map['artUri'] as String).replaceFirst(
+                              '/thumbs_small/',
+                              '/',
+                            ),
+                          )
+                          : null,
+                );
+                return {
+                  'audioSource': ProgressiveAudioSource(
+                    Uri.parse(map['id']),
+                    tag: mediaItem,
+                  ),
+                  'runtime': map['runtime'] ?? 'Unknown',
+                  'albumUrl': map['albumUrl'] ?? '',
+                  'index': map['index'] ?? 0,
+                  'songPageUrl': map['songPageUrl'] ?? '',
+                };
+              }).toList();
+        });
+        debugPrint('Loaded ${_favorites.length} favorite songs');
+      } catch (e) {
+        debugPrint('Error loading favorites: $e');
+      }
+    }
+  }
+
+  Future<void> _savePreferences() async {
+    await PreferencesManager.setBool('shuffleEnabled', _isShuffleEnabled);
+    await PreferencesManager.setString(
+      'loopMode',
+      {
+        LoopMode.off: 'off',
+        LoopMode.one: 'one',
+        LoopMode.all: 'all',
+      }[_loopMode]!,
+    );
+  }
+
+  Future<void> _loadPlaylists() async {
+    setState(() {
+      _isLoginLoading = true;
+    });
+
+    try {
+      final cookies = PreferencesManager.getCookies();
+      final cookieString = cookies.entries
+          .map((e) => '${e.key}=${e.value}')
+          .join('; ');
+
+      final response = await _httpClient.get(
+        Uri.parse('https://downloads.khinsider.com/playlist/browse'),
+        headers: {
+          'Cookie': cookieString,
+          'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+        },
+      );
+
+      debugPrint('Playlist browse response status: ${response.statusCode}');
+      debugPrint(
+        'Playlist browse response body (first 1000 chars): ${response.body.substring(0, response.body.length > 1000 ? 1000 : response.body.length)}',
+      );
+
+      if (response.statusCode != 200) {
+        throw Exception('Failed to load playlists: ${response.statusCode}');
+      }
+
+      final directory = await getApplicationDocumentsDirectory();
+      final file = File('${directory.path}/playlists.html');
+      await file.writeAsString(response.body);
+      debugPrint('Saved playlists HTML to ${file.path}');
+
+      final playlists = parsePlaylists(response.body);
+      debugPrint('Parsed ${playlists.length} playlists');
+
+      setState(() {
+        _playlists = playlists;
+        _isLoginLoading = false;
+      });
+    } catch (e) {
+      debugPrint('Error loading playlists: $e');
+      setState(() {
+        _isLoginLoading = false;
+      });
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to load playlists: $e')));
+    }
+  }
+
+  // New: Refresh session (dummy implementation, always returns false)
+
+  // New: Fetch songs from a playlist
+  Future<void> _fetchPlaylistSongs(String playlistUrl) async {
+    setState(() {
+      _isSongsLoading = true;
+    });
+
+    try {
+      // Fetch playlist page without cookies for public access
+      final response = await _httpClient.get(
+        Uri.parse('https://downloads.khinsider.com$playlistUrl'),
+        headers: {
+          'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+        },
+      );
+
+      if (response.statusCode != 200) {
+        throw Exception('Failed to load playlist: ${response.statusCode}');
+      }
+
+      // Save HTML for debugging
+      final directory = await getApplicationDocumentsDirectory();
+      final file = File(
+        '${directory.path}/playlist_${playlistUrl.replaceAll('/', '_')}.html',
+      );
+      await file.writeAsString(response.body);
+      debugPrint('Saved playlist HTML to ${file.path}');
+
+      final document = html_parser.parse(response.body);
+      final songRows = document.querySelectorAll('#songlist tr');
+
+      if (songRows.length < 3) {
+        debugPrint('Not enough rows in #songlist: ${songRows.length}');
+        throw Exception('No songs found in playlist');
+      }
+
+      debugPrint('Total rows in #songlist: ${songRows.length}');
+
+      final List<Map<String, dynamic>> songs = [];
+      final List<Future<Map<String, dynamic>?>> futures = [];
+      final pool = Pool(Platform.numberOfProcessors);
+
+      // Process all rows except first (header) and last (footer)
+      for (var i = 1; i < songRows.length - 1; i++) {
+        final row = songRows[i];
+        debugPrint('Processing row $i: ${row.outerHtml.substring(0, 50)}...');
+
+        final cells = row.querySelectorAll('td');
+        if (cells.length != 7) {
+          debugPrint(
+            'Skipping row $i: Expected 7 cells, found ${cells.length}',
+          );
+          continue;
+        }
+
+        // Extract title and song URL (cells[3], first <a>)
+        final titleCell = cells[3];
+        final titleLink = titleCell.querySelector('a');
+        final name = titleLink?.text.trim() ?? '';
+        final href = titleLink?.attributes['href'];
+        if (href == null || name.isEmpty) {
+          debugPrint('Skipping row $i: Missing title or href');
+          continue;
+        }
+
+        // Extract album name and URL (cells[3], second <a>)
+        final albumLinks = titleCell.querySelectorAll('a');
+        final albumLink = albumLinks.length > 1 ? albumLinks[1] : null;
+        final albumName = albumLink?.text.trim() ?? 'Unknown Album';
+        final albumUrl = albumLink?.attributes['href'] ?? '';
+
+        // Extract runtime (cells[4], <a> text)
+        final runtimeCell = cells[4];
+        final runtime = runtimeCell.querySelector('a')?.text.trim() ?? '';
+        if (!RegExp(r'^\d+:\d{2}$').hasMatch(runtime) && runtime != '0:45') {
+          debugPrint('Skipping row $i: Invalid runtime format "$runtime"');
+          continue;
+        }
+
+        // Extract album art (cells[2], <img src>)
+        final albumIconCell = cells[2];
+        final albumArtImg = albumIconCell.querySelector('img');
+        final albumArtUrl = albumArtImg?.attributes['src']?.replaceFirst(
+          '/thumbs_small/',
+          '/',
+        );
+
+        // Extract song ID (row or .playlistAddTo)
+        final songId =
+            row.attributes['songid'] ??
+            row.querySelector('.playlistAddTo')?.attributes['songid'];
+
+        final songPageUrl = 'https://downloads.khinsider.com$href';
+
+        futures.add(
+          pool.withResource(
+            () => _parseSongPage(songPageUrl)
+                .then((songData) {
+                  final mp3Url = songData['mp3Url']!;
+                  final audioSource = ProgressiveAudioSource(
+                    Uri.parse(mp3Url),
+                    tag: MediaItem(
+                      id: mp3Url,
+                      title: name.isNotEmpty ? name : 'Unknown Song',
+                      album: albumName.isNotEmpty ? albumName : 'Unknown Album',
+                      artist:
+                          albumName.isNotEmpty ? albumName : 'Unknown Artist',
+                      artUri:
+                          albumArtUrl!.isNotEmpty
+                              ? Uri.parse(albumArtUrl)
+                              : null,
+                      duration:
+                          runtime.isNotEmpty
+                              ? Duration(
+                                minutes: int.parse(runtime.split(':')[0]),
+                                seconds: int.parse(runtime.split(':')[1]),
+                              )
+                              : null,
+                    ),
+                  );
+                  return {
+                    'audioSource': audioSource,
+                    'runtime': runtime,
+                    'albumUrl': albumUrl.replaceFirst(
+                      'https://downloads.khinsider.com',
+                      '',
+                    ),
+                    'index': songs.length,
+                    'songPageUrl': songPageUrl,
+                    'songId': songId,
+                  };
+                })
+                .catchError((e) {
+                  debugPrint('Error fetching song: $e');
+                  return <String, dynamic>{};
+                }),
+          ),
+        );
+      }
+
+      final results = await Future.wait(futures);
+      songs.addAll(results.whereType<Map<String, dynamic>>());
+
+      setState(() {
+        _songs = songs;
+        _selectedAlbum = {
+          'albumName': _selectedPlaylist!.name,
+          'albumUrl': playlistUrl,
+          'imageUrl':
+              _selectedPlaylist!.imageUrl?.replaceFirst(
+                '/thumbs_small/',
+                '/',
+              ) ??
+              '',
+          'type': 'Playlist',
+          'year': '',
+          'platform': '',
+        };
+        _isFavoritesSelected = false;
+        _playlist = ConcatenatingAudioSource(
+          children:
+              songs.map((song) => song['audioSource'] as AudioSource).toList(),
+        );
+        _isSongsLoading = false;
+      });
+
+      debugPrint('Parsed ${songs.length} songs from playlist');
+      if (songs.isEmpty) {
+        debugPrint('Warning: No valid songs parsed from playlist');
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No valid songs found in playlist')),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error fetching playlist songs: $e');
+      setState(() {
+        _isSongsLoading = false;
+      });
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to load songs: $e')));
+    }
+  }
+
+  Future<List<Map<String, String>>> _fetchAlbumsAsync(String query) async {
+    final formattedText = query.replaceAll(' ', '+');
+    final url = Uri.parse(
+      'https://downloads.khinsider.com/search?search=$formattedText',
+    );
+    final response = await _httpClient.get(url);
+    if (response.statusCode == 200) {
+      return await compute(parseAlbumList, response.body);
+    } else {
+      throw Exception('Failed to load albums');
+    }
+  }
+
+  void _playPause() {
+    if (_player.playing) {
+      _player.pause();
+    } else {
+      _player.play();
+    }
+    _savePlaybackState();
+  }
+
+  Future<void> _playAudioSourceAtIndex(int index, bool isFavorites) async {
+    // [Existing _playAudioSourceAtIndex implementation]
+    try {
+      final songList = isFavorites ? _favorites : _songs;
+      if (index >= songList.length || index < 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Cannot play song: invalid index.')),
+        );
+        return;
+      }
+      setState(() {
+        _playlist = ConcatenatingAudioSource(
+          children:
+              songList
+                  .map((song) => song['audioSource'] as AudioSource)
+                  .toList(),
+        );
+        _isFavoritesSelected = isFavorites;
+        _isPlayerExpanded = true;
+      });
+      _songState.value = SongState(
+        index,
+        (songList[index]['audioSource'] as ProgressiveAudioSource).uri
+            .toString(),
+      );
+      await _player.setAudioSource(_playlist!, initialIndex: index);
+      await _player.play();
+      _savePlaybackState();
+    } catch (e) {
+      debugPrint('Error playing audio: $e');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to play song: $e')));
+    }
+  }
+
+  void _toggleShuffle() async {
+    if (_playlist == null) return;
+    setState(() {
+      _isShuffleEnabled = !_isShuffleEnabled;
+    });
+    await _player.setShuffleModeEnabled(_isShuffleEnabled);
+    if (_isShuffleEnabled) {
+      await _player.shuffle();
+    }
+    await _savePreferences();
+    _savePlaybackState();
+  }
+
+  void _toggleLoopMode() {
+    setState(() {
+      if (_loopMode == LoopMode.off) {
+        _loopMode = LoopMode.one;
+      } else if (_loopMode == LoopMode.one) {
+        _loopMode = LoopMode.all;
+      } else {
+        _loopMode = LoopMode.off;
+      }
+    });
+    _player.setLoopMode(_loopMode);
+    _savePreferences();
+    _savePlaybackState();
+  }
+
+  String _formatDuration(Duration duration) {
+    final minutes = duration.inMinutes;
+    final seconds = duration.inSeconds % 60;
+    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _fetchAlbumPage(String albumUrl) async {
+    setState(() {
+      _isSongsLoading = true;
+      debugPrint('Fetching album page: $albumUrl, setting isSongsLoading=true');
+    });
+
+    // Fix: Use albumUrl directly if it's fully qualified, otherwise prepend base URL
+    final fullUrl =
+        albumUrl.startsWith('http')
+            ? albumUrl
+            : 'https://downloads.khinsider.com$albumUrl';
+
+    try {
+      final response = await _httpClient.get(Uri.parse(fullUrl));
+      if (response.statusCode == 200) {
+        final document = html_parser.parse(response.body);
+        final imageUrl = _getHighResImageUrl(
+          document.querySelector('.albumImage img')?.attributes['src'] ?? '',
+        );
+
+        final albumName =
+            document.querySelector('h2')?.text.trim() ?? 'Unknown';
+        String type = _selectedAlbum?['type'] ?? '';
+        String year = _selectedAlbum?['year'] ?? '';
+        String platform = _selectedAlbum?['platform'] ?? '';
+
+        // [Rest of metadata parsing remains unchanged]
+        final metadataParagraph = document.querySelector('p[align="left"]');
+        if (metadataParagraph != null) {
+          final rawInnerHtml = metadataParagraph.innerHtml;
+          debugPrint('Raw metadata HTML: "$rawInnerHtml"');
+          final metadataLines =
+              rawInnerHtml
+                  .split(RegExp(r'<br\s*/?>'))
+                  .map((line) => line.trim())
+                  .toList();
+          debugPrint('Split metadata lines: $metadataLines');
+          for (final line in metadataLines) {
+            if (line.isEmpty) continue;
+            String text = line.replaceAll(RegExp(r'<[^>]+>'), '').trim();
+            text = text.replaceAll(RegExp(r'\s+'), ' ');
+            debugPrint('Cleaned metadata line: "$text"');
+            if (text.isEmpty) continue;
+            if (RegExp(
+              r'^(Platforms?|Platform)\s*:',
+              caseSensitive: false,
+            ).hasMatch(text)) {
+              platform =
+                  text
+                      .replaceFirst(
+                        RegExp(
+                          r'^(Platforms?|Platform)\s*:',
+                          caseSensitive: false,
+                        ),
+                        '',
+                      )
+                      .trim();
+              debugPrint('Extracted platform: "$platform"');
+            } else if (RegExp(
+              r'^Year\s*:',
+              caseSensitive: false,
+            ).hasMatch(text)) {
+              year =
+                  text
+                      .replaceFirst(
+                        RegExp(r'^Year\s*:', caseSensitive: false),
+                        '',
+                      )
+                      .trim();
+              debugPrint('Extracted year: "$year"');
+            } else if (RegExp(
+              r'^(Album type|Type)\s*:',
+              caseSensitive: false,
+            ).hasMatch(text)) {
+              type =
+                  text
+                      .replaceFirst(
+                        RegExp(r'^(Album type|Type)\s*:', caseSensitive: false),
+                        '',
+                      )
+                      .trim();
+              debugPrint('Extracted type: "$type"');
+            }
+          }
+        } else {
+          debugPrint('No metadata paragraph found for $fullUrl');
+        }
+
+        if (type.isEmpty || year.isEmpty || platform.isEmpty) {
+          final metaDescription =
+              document
+                  .querySelector('meta[name="description"]')
+                  ?.attributes['content'] ??
+              '';
+          debugPrint('Meta description: "$metaDescription"');
+          if (metaDescription.isNotEmpty) {
+            final regex = RegExp(
+              r'\(([^)]+)\)\s*\((gamerip|soundtrack|singles|arrangements|remixes|compilations|inspired by)\)\s*\((\d{4})\)',
+              caseSensitive: false,
+            );
+            final match = regex.firstMatch(metaDescription);
+            if (match != null) {
+              if (platform.isEmpty)
+                platform = match.group(1)?.trim() ?? platform;
+              if (type.isEmpty) type = match.group(2)?.trim() ?? type;
+              if (year.isEmpty) year = match.group(3)?.trim() ?? year;
+              debugPrint(
+                'Fallback extracted: platform="$platform", type="$type", year="$year"',
+              );
+            }
+          }
+        }
+
+        debugPrint(
+          'Final parsed metadata: type="$type", year="$year", platform="$platform"',
+        );
+
+        final songs = await compute(
+          (input) => parseSongList(
+            input['body']!,
+            input['albumName']!,
+            input['imageUrl']!,
+            input['albumUrl']!,
+          ),
+          {
+            'body': response.body,
+            'albumName': albumName,
+            'imageUrl': imageUrl.replaceFirst('/thumbs_small/', '/'),
+            'albumUrl': albumUrl,
+          },
+        );
+
+        setState(() {
+          _selectedAlbum = {
+            'imageUrl': imageUrl.replaceFirst('/thumbs_small/', '/'),
+            'albumName': albumName,
+            'albumUrl': albumUrl,
+            'type': type,
+            'year': year,
+            'platform': platform,
+          };
+          _songs = songs;
+          _isSongsLoading = false;
+          debugPrint(
+            'Album page loaded: ${_songs.length} songs fetched, isSongsLoading=false',
+          );
+        });
+      } else {
+        debugPrint('Error: ${response.statusCode}');
+        setState(() {
+          _isSongsLoading = false;
+          debugPrint(
+            'Album page fetch failed: status=${response.statusCode}, isSongsLoading=false',
+          );
+        });
+        throw Exception('Failed to load album page: ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('Error occurred while fetching album page: $e');
+      setState(() {
+        _isSongsLoading = false;
+        debugPrint('Album page fetch error: $e, isSongsLoading=false');
+      });
+      rethrow; // Rethrow to be caught in _handleDeepLink
+    }
+  }
+
+  String _getHighResImageUrl(String url) {
+    return url.replaceFirst('/thumbs/', '/');
+  }
+
+  void _shareAlbum(String albumUrl) {
+    final shareUrl = 'https://downloads.khinsider.com$albumUrl';
+    Share.share(shareUrl, subject: 'Check out this album!');
+  }
+
+  void _shareSong(Map<String, dynamic> song) {
+    final songPageUrl = song['songPageUrl'] as String?;
+    if (songPageUrl == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Song URL not available for sharing.')),
+      );
+      return;
+    }
+    final shareUrl = songPageUrl;
+    Share.share(shareUrl, subject: 'Check out this song!');
+  }
+
+  // New: Logout function
+  void _logout() async {
+    await PreferencesManager.clearCookies();
+    setState(() {
+      _playlists = [];
+      _selectedPlaylist = null;
+      _songs = [];
+      _playlist = null;
+      _isFavoritesSelected = false;
+      _emailController.clear();
+      _passwordController.clear();
+    });
+    _player.stop();
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Logged out successfully')));
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchPlaylistPopup(String songId) async {
+    final client = http.Client();
+    try {
+      final cookies = await PreferencesManager.getCookies();
+      if (cookies.isEmpty) {
+        debugPrint('Error: No cookies found in PreferencesManager');
+        throw Exception('No authentication cookies available');
+      }
+      final cookieString = cookies.entries
+          .map((entry) => "${entry.key}=${entry.value}")
+          .join('; ');
+      debugPrint('Sending cookies: $cookieString');
+
+      final response = await client
+          .get(
+            Uri.parse(
+              'https://downloads.khinsider.com/playlist/popup_list?songid=$songId',
+            ),
+            headers: {
+              'Cookie': cookieString,
+              'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            },
+          )
+          .timeout(const Duration(seconds: 10));
+
+      // Debug: Print raw response (check for errors or unexpected HTML)
+      debugPrint('Raw HTML: ${response.body}');
+
+      final document = html_parser.parse(response.body);
+
+      // Try BOTH selectors to see which one works
+      var playlistLabels = document.querySelectorAll(
+        'label.playlistPopupLabel',
+      );
+      if (playlistLabels.isEmpty) {
+        debugPrint(
+          'Warning: No labels found with selector "label.playlistPopupLabel"',
+        );
+        playlistLabels = document.querySelectorAll('label[playlistid]');
+      }
+
+      debugPrint('Found ${playlistLabels.length} labels');
+      final playlists = <Map<String, dynamic>>[];
+      for (final label in playlistLabels) {
+        final checkbox = label.querySelector('input[type="checkbox"]');
+        final playlistId = label.attributes['playlistid'];
+
+        // Extract name
+        String name = '';
+        for (var node in label.nodes) {
+          if (node is html_parser.Text && node.text.trim().isNotEmpty) {
+            name = node.text.trim();
+            break;
+          }
+        }
+
+        // Robust checked detection
+        bool isChecked;
+        if (checkbox?.attributes == null) {
+          // Fallback to HTML string check
+          isChecked = label.innerHtml.contains(' checked');
+        } else {
+          // Normal attribute check
+          isChecked = checkbox?.attributes.containsKey('checked') ?? false;
+        }
+
+        if (playlistId != null && name.isNotEmpty) {
+          playlists.add({
+            'id': playlistId,
+            'name': name,
+            'isChecked': isChecked,
+          });
+          debugPrint(
+            'Parsed playlist: id=$playlistId, name=$name, isChecked=$isChecked',
+          );
+        }
+      }
+
+      debugPrint('Parsed ${playlists.length} playlists');
+      return playlists;
+    } catch (e) {
+      debugPrint('Error fetching playlist popup: $e');
+      rethrow;
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<void> _togglePlaylistMembership(
+    String songId,
+    String playlistId,
+  ) async {
+    final cookies = PreferencesManager.getCookies();
+    final cookieString = cookies.entries
+        .map((e) => '${e.key}=${e.value}')
+        .join('; ');
+    final client = http.Client();
+
+    debugPrint(playlistId);
+
+    try {
+      final url = Uri.parse(
+        'https://downloads.khinsider.com/playlist/popup_toggle?songid=${Uri.encodeQueryComponent(songId)}&playlistid=${Uri.encodeQueryComponent(playlistId)}',
+      );
+
+      debugPrint(url.toString());
+      final response = await client
+          .get(
+            url,
+            headers: {
+              'Cookie': cookieString,
+              'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+              'Accept':
+                  'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Encoding': 'gzip, deflate, br',
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+          )
+          .timeout(const Duration(seconds: 10));
+
+      debugPrint('Toggle playlist status: ${response.statusCode}');
+      html_parser.parse(response.body);
+      // final title = document.querySelector('title')?.text.trim();
+      // debugPrint('Create playlist page title: $title');
+
+      // if (response.statusCode != 200 || title == 'Please Log In') {
+      //   throw Exception('Session expired or failed to create playlist');
+      // }
+    } catch (e) {
+      debugPrint('Error toggling playlist: $e');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to toggle playlist: $e')));
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<void> _showAddToPlaylistDialog(Map<String, dynamic> song) async {
+    final songId = song['songId'] as String?;
+    if (songId == null) {
+      debugPrint('Invalid songId: $songId for song: ${song['songPageUrl']}');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Cannot add song: Invalid or missing playlist ID'),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _isLoginLoading = true);
+    List<Map<String, dynamic>> playlists;
+    try {
+      playlists = await _fetchPlaylistPopup(songId);
+    } catch (e) {
+      setState(() => _isLoginLoading = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to load playlists: $e')));
+      return;
+    }
+    setState(() => _isLoginLoading = false);
+
+    if (playlists.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('No playlists available')));
+      return;
+    }
+
+    final checkboxStates = Map<String, bool>.fromEntries(
+      playlists.map((p) => MapEntry(p['id'] as String, p['isChecked'] as bool)),
+    );
+
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder:
+          (context) => StatefulBuilder(
+            builder:
+                (context, setDialogState) => AlertDialog(
+                  title: const Text('Add to Playlists'),
+                  content: SizedBox(
+                    width: double.maxFinite,
+                    child: ListView(
+                      shrinkWrap: true,
+                      children:
+                          playlists.map((playlist) {
+                            final playlistId = playlist['id'] as String;
+                            return CheckboxListTile(
+                              title: Text(playlist['name'] as String),
+                              value: checkboxStates[playlistId] ?? false,
+                              onChanged: (value) async {
+                                if (value == null) return;
+                                setState(() => _isLoginLoading = true);
+                                try {
+                                  final numericPlaylistId = _extractNumericId(
+                                    playlistId,
+                                  );
+                                  await _togglePlaylistMembership(
+                                    songId,
+                                    numericPlaylistId,
+                                  );
+                                  setDialogState(
+                                    () => checkboxStates[playlistId] = value,
+                                  );
+                                } catch (e) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        'Failed to update playlist: $e',
+                                      ),
+                                    ),
+                                  );
+                                } finally {
+                                  setState(() => _isLoginLoading = false);
+                                }
+                              },
+                            );
+                          }).toList(),
+                    ),
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('Close'),
+                    ),
+                  ],
+                ),
+          ),
+    );
+  }
+
+  String _extractNumericId(String id) {
+    return id.replaceAll(RegExp(r'[^0-9]'), '');
+  }
+
+  Future<void> _createPlaylist() async {
+    if (!PreferencesManager.isLoggedIn()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please log in to create a playlist')),
+      );
+      return;
+    }
+
+    final TextEditingController nameController = TextEditingController();
+    final result = await showDialog<String>(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: const Text('New Playlist'),
+            content: TextField(
+              controller: nameController,
+              decoration: const InputDecoration(
+                labelText: 'Playlist Name',
+                border: OutlineInputBorder(),
+              ),
+              maxLength: 50,
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () {
+                  final name = nameController.text.trim();
+                  if (name.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Playlist name cannot be empty'),
+                      ),
+                    );
+                    return;
+                  }
+                  Navigator.pop(context, name);
+                },
+                child: const Text('Create'),
+              ),
+            ],
+          ),
+    );
+
+    if (result == null || result.isEmpty) return;
+
+    setState(() => _isLoginLoading = true);
+    final cookies = PreferencesManager.getCookies();
+    final cookieString = cookies.entries
+        .map((e) => '${e.key}=${e.value}')
+        .join('; ');
+    final client = http.Client();
+
+    try {
+      final url = Uri.parse(
+        'https://downloads.khinsider.com/playlist/add?name=${Uri.encodeQueryComponent(result)}',
+      );
+      final response = await client
+          .get(
+            url,
+            headers: {
+              'Cookie': cookieString,
+              'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+              'Accept':
+                  'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Encoding': 'gzip, deflate, br',
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+          )
+          .timeout(const Duration(seconds: 10));
+
+      debugPrint('Create playlist status: ${response.statusCode}');
+      final document = html_parser.parse(response.body);
+      final title = document.querySelector('title')?.text.trim();
+      debugPrint('Create playlist page title: $title');
+
+      if (response.statusCode != 200 || title == 'Please Log In') {
+        throw Exception('Session expired or failed to create playlist');
+      }
+
+      await _loadPlaylists(); // Refresh playlists
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Playlist "$result" created')));
+    } catch (e) {
+      debugPrint('Error creating playlist: $e');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to create playlist: $e')));
+    } finally {
+      setState(() => _isLoginLoading = false);
+      client.close();
+    }
+  }
+
+  Widget _buildExpandedPlayer() {
+    return ValueListenableBuilder<SongState>(
+      valueListenable: _songState,
+      builder: (context, songState, child) {
+        if (_playlist == null ||
+            songState.index >= _playlist!.children.length) {
+          return const SizedBox();
+        }
+        final song =
+            (_playlist!.children[songState.index] as ProgressiveAudioSource).tag
+                as MediaItem;
+
+        return Material(
+          elevation: 12,
+          color: Theme.of(context).scaffoldBackgroundColor,
+          child: Container(
+            height: MediaQuery.of(context).size.height,
+            width: MediaQuery.of(context).size.width,
+            color: Theme.of(context).scaffoldBackgroundColor,
+            padding: const EdgeInsets.only(
+              top: 40,
+              left: 20,
+              right: 20,
+              bottom: 40,
+            ),
+            child: Column(
+              children: [
+                Align(
+                  alignment: Alignment.topRight,
+                  child: IconButton(
+                    icon: const Icon(Icons.keyboard_arrow_down),
+                    onPressed: () {
+                      setState(() {
+                        _isPlayerExpanded = false;
+                        SystemChrome.setEnabledSystemUIMode(
+                          SystemUiMode.edgeToEdge,
+                        );
+                      });
+                    },
+                  ),
+                ),
+                const Spacer(),
+                if (song.artUri != null)
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.network(
+                      song.artUri.toString(),
+                      width: 200,
+                      height: 200,
+                      fit: BoxFit.cover,
+                    ),
+                  )
+                else
+                  Container(
+                    width: 200,
+                    height: 200,
+                    color: Colors.grey[300],
+                    child: const Icon(Icons.music_note, size: 100),
+                  ),
+                const SizedBox(height: 20),
+                Text(
+                  song.title,
+                  style: const TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                Text(
+                  song.album ?? 'Unknown',
+                  style: const TextStyle(fontSize: 16, color: Colors.grey),
+                  textAlign: TextAlign.center,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.playlist_add),
+                  tooltip:
+                      PreferencesManager.isLoggedIn()
+                          ? 'Add to Playlist'
+                          : 'Please log in to add to playlist',
+                  onPressed:
+                      PreferencesManager.isLoggedIn()
+                          ? () {
+                            final songList =
+                                _isFavoritesSelected ? _favorites : _songs;
+                            if (songState.index < songList.length) {
+                              debugPrint(
+                                'Opening playlist dialog for song at index ${songState.index}',
+                              );
+                              _showAddToPlaylistDialog(
+                                songList[songState.index],
+                              );
+                            }
+                          }
+                          : () => ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Please log in to add to playlist'),
+                            ),
+                          ),
+                ),
+                const Spacer(),
+                StreamBuilder<Duration>(
+                  stream: _player.positionStream,
+                  builder: (context, snapshot) {
+                    final position = snapshot.data ?? Duration.zero;
+                    final duration = _player.duration ?? Duration.zero;
+                    return Column(
+                      children: [
+                        Slider(
+                          value: position.inSeconds.toDouble().clamp(
+                            0.0,
+                            duration.inSeconds.toDouble(),
+                          ),
+                          min: 0.0,
+                          max: duration.inSeconds.toDouble(),
+                          onChanged: (value) {
+                            _player.seek(Duration(seconds: value.toInt()));
+                          },
+                        ),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(_formatDuration(position)),
+                            Text(_formatDuration(duration)),
+                          ],
+                        ),
+                      ],
+                    );
+                  },
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    IconButton(
+                      iconSize: 40.0,
+                      icon: Icon(
+                        Icons.shuffle,
+                        color: _isShuffleEnabled ? Colors.blue : Colors.grey,
+                      ),
+                      onPressed: _toggleShuffle,
+                    ),
+                    IconButton(
+                      iconSize: 40.0,
+                      icon: const Icon(Icons.skip_previous),
+                      onPressed: () {
+                        final position = _player.position;
+                        if (position.inSeconds <= 2 && songState.index > 0) {
+                          _player.seekToPrevious();
+                        } else {
+                          _player.seek(Duration.zero);
+                        }
+                      },
+                    ),
+                    StreamBuilder<PlayerState>(
+                      stream: _player.playerStateStream,
+                      builder: (context, snapshot) {
+                        final playerState = snapshot.data;
+                        return IconButton(
+                          iconSize: 48.0,
+                          icon: Icon(
+                            playerState?.playing == true
+                                ? Icons.pause
+                                : Icons.play_arrow,
+                          ),
+                          onPressed: _playPause,
+                        );
+                      },
+                    ),
+                    IconButton(
+                      iconSize: 40.0,
+                      icon: const Icon(Icons.skip_next),
+                      onPressed: () {
+                        if (songState.index < _playlist!.children.length - 1) {
+                          _player.seekToNext();
+                        }
+                      },
+                    ),
+                    IconButton(
+                      iconSize: 40.0,
+                      icon: Icon(
+                        _loopMode == LoopMode.one
+                            ? Icons.repeat_one
+                            : Icons.repeat,
+                        color:
+                            _loopMode != LoopMode.off
+                                ? Colors.blue
+                                : Colors.grey,
+                      ),
+                      onPressed: _toggleLoopMode,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildMiniPlayer() {
+    return ValueListenableBuilder<SongState>(
+      valueListenable: _songState,
+      builder: (context, songState, child) {
+        if (_playlist == null ||
+            songState.index >= _playlist!.children.length) {
+          return const SizedBox();
+        }
+        final song =
+            (_playlist!.children[songState.index] as ProgressiveAudioSource).tag
+                as MediaItem;
+
+        return Material(
+          elevation: 6,
+          color: Theme.of(context).cardColor,
+          child: InkWell(
+            onTap: () {
+              setState(() {
+                _isPlayerExpanded = true;
+              });
+            },
+            child: Container(
+              height: 70,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Row(
+                children: [
+                  if (song.artUri != null)
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: Image.network(
+                        song.artUri.toString(),
+                        width: 50,
+                        height: 50,
+                        fit: BoxFit.cover,
+                      ),
+                    )
+                  else
+                    Container(
+                      width: 50,
+                      height: 50,
+                      color: Colors.grey[300],
+                      child: const Icon(Icons.music_note, size: 30),
+                    ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      song.title,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 16),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.playlist_add),
+                    tooltip:
+                        PreferencesManager.isLoggedIn()
+                            ? 'Add to Playlist'
+                            : 'Please log in to add to playlist',
+                    onPressed:
+                        PreferencesManager.isLoggedIn()
+                            ? () {
+                              final songList =
+                                  _isFavoritesSelected ? _favorites : _songs;
+                              if (songState.index < songList.length) {
+                                debugPrint(
+                                  'Opening playlist dialog for song at index ${songState.index}',
+                                );
+                                _showAddToPlaylistDialog(
+                                  songList[songState.index],
+                                );
+                              }
+                            }
+                            : () => ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Please log in to add to playlist',
+                                ),
+                              ),
+                            ),
+                  ),
+                  StreamBuilder<PlayerState>(
+                    stream: _player.playerStateStream,
+                    builder: (context, snapshot) {
+                      final playerState = snapshot.data;
+                      return IconButton(
+                        icon: Icon(
+                          playerState?.playing == true
+                              ? Icons.pause
+                              : Icons.play_arrow,
+                        ),
+                        onPressed: _playPause,
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildAlbumList() {
+    return FutureBuilder<List<Map<String, String>>>(
+      future: _fetchAlbumsAsync(_searchController.text),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        } else if (snapshot.hasError) {
+          return Center(child: Text('Error: ${snapshot.error}'));
+        } else if (!snapshot.hasData || snapshot.data!.isEmpty) {
+          return const Center(child: Text('No albums found.'));
+        } else {
+          _albums = snapshot.data!;
+          final types =
+              _albums
+                  .map(
+                    (album) => album['type']!.isEmpty ? 'None' : album['type']!,
+                  )
+                  .toSet()
+                  .toList()
+                ..sort();
+          _albumTypes = ['All', ...types];
+
+          final filteredAlbums =
+              _selectedType == 'All'
+                  ? _albums
+                  : _albums
+                      .where(
+                        (album) =>
+                            (album['type']!.isEmpty
+                                ? 'None'
+                                : album['type']!) ==
+                            _selectedType,
+                      )
+                      .toList();
+
+          return Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                child: DropdownButton<String>(
+                  value: _selectedType,
+                  isExpanded: true,
+                  hint: const Text('Filter by Type'),
+                  items:
+                      _albumTypes.map((type) {
+                        return DropdownMenuItem<String>(
+                          value: type,
+                          child: Text(type),
+                        );
+                      }).toList(),
+                  onChanged: (value) {
+                    setState(() {
+                      _selectedType = value ?? 'All';
+                    });
+                  },
+                ),
+              ),
+              const SizedBox(height: 8),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: filteredAlbums.length,
+                  itemBuilder: (context, index) {
+                    final album = filteredAlbums[index];
+                    return ListTile(
+                      leading:
+                          album['imageUrl']!.isNotEmpty
+                              ? CircleAvatar(
+                                backgroundImage: NetworkImage(
+                                  album['imageUrl']!,
+                                ),
+                                radius: 30,
+                              )
+                              : const CircleAvatar(
+                                backgroundColor: Colors.grey,
+                                radius: 30,
+                                child: Icon(
+                                  Icons.music_note,
+                                  color: Colors.white,
+                                ),
+                              ),
+                      title: Text(album['albumName']!),
+                      subtitle: Text(
+                        '${album['type']!.isEmpty ? 'None' : album['type']} - ${album['year']} | ${album['platform']}',
+                      ),
+                      onTap: () {
+                        setState(() {
+                          _selectedAlbum = Map<String, String>.from(album);
+                          _isFavoritesSelected = false;
+                        });
+                        _fetchAlbumPage(album['albumUrl']!);
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          );
+        }
+      },
+    );
+  }
+
+  Widget _buildPlaylistsList() {
+    if (!PreferencesManager.isLoggedIn() && !_isLoginLoading) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              TextField(
+                controller: _emailController,
+                decoration: const InputDecoration(
+                  labelText: 'Your name or email address',
+                  border: OutlineInputBorder(),
+                ),
+                keyboardType: TextInputType.emailAddress,
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _passwordController,
+                decoration: const InputDecoration(
+                  labelText: 'Password',
+                  border: OutlineInputBorder(),
+                ),
+                obscureText: true,
+              ),
+              const SizedBox(height: 24),
+              _isLoginLoading
+                  ? const CircularProgressIndicator()
+                  : ElevatedButton(
+                    onPressed: () async {
+                      await _performLogin();
+                      if (PreferencesManager.isLoggedIn()) {
+                        await _loadPlaylists();
+                      }
+                    },
+                    child: const Text('Login'),
+                  ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (_selectedPlaylist != null) {
+      if (_isSongsLoading) {
+        debugPrint(
+          'Showing loading screen for playlist ${_selectedPlaylist!.name}',
+        );
+        return const Center(child: CircularProgressIndicator());
+      }
+
+      // Use _buildSongList to display playlist songs like an album
+      return _buildSongList();
+    }
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'Playlists',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+              Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.add),
+                    tooltip: 'New Playlist',
+                    onPressed: _createPlaylist,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.logout),
+                    onPressed: _logout,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child:
+              _isLoginLoading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _playlists.isEmpty
+                  ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Text('No playlists available.'),
+                        const SizedBox(height: 16),
+                        ElevatedButton(
+                          onPressed: _loadPlaylists,
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
+                  )
+                  : ListView.builder(
+                    itemCount: _playlists.length,
+                    itemBuilder: (context, index) {
+                      final playlist = _playlists[index];
+                      debugPrint(
+                        'Playlist ${playlist.name} imageUrl: ${playlist.imageUrl}',
+                      );
+                      return ListTile(
+                        leading:
+                            playlist.imageUrl != null
+                                ? CircleAvatar(
+                                  backgroundImage: NetworkImage(
+                                    playlist.imageUrl!,
+                                  ),
+                                  radius: 30,
+                                  onBackgroundImageError: (error, stackTrace) {
+                                    debugPrint(
+                                      'Failed to load art for ${playlist.name}: $error',
+                                    );
+                                  },
+                                )
+                                : const CircleAvatar(
+                                  backgroundColor: Colors.grey,
+                                  radius: 30,
+                                  child: Icon(
+                                    Icons.playlist_play,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                        title: Text(playlist.name),
+                        subtitle: Text('${playlist.songCount} songs'),
+                        onTap: () {
+                          setState(() {
+                            _selectedPlaylist = playlist;
+                            _isSongsLoading = true;
+                          });
+                          _fetchPlaylistSongs(playlist.url);
+                        },
+                      );
+                    },
+                  ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSongList() {
+    debugPrint(
+      'Building song list: isSongsLoading=$_isSongsLoading, selectedAlbum=${_selectedAlbum != null}, songsCount=${_songs.length}',
+    );
+
+    if (_isSongsLoading) {
+      debugPrint('Showing loading indicator for song list');
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_selectedAlbum == null) {
+      debugPrint('No album or playlist selected');
+      return const Center(child: Text('No album or playlist selected.'));
+    }
+
+    if (_songs.isEmpty) {
+      debugPrint('No songs available for ${_selectedAlbum!['albumName']}');
+      return const Center(child: Text('No songs available.'));
+    }
+
+    debugPrint(
+      'Rendering song list for ${_selectedAlbum!['albumName']} with ${_songs.length} songs',
+    );
+    return ListView(
+      children: [
+        const SizedBox(height: 16),
+        Center(
+          child:
+              _selectedAlbum!['imageUrl']?.isNotEmpty == true
+                  ? ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.network(
+                      _selectedAlbum!['imageUrl']!,
+                      width: 200,
+                      height: 200,
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) {
+                        debugPrint('Failed to load album image: $error');
+                        return Container(
+                          width: 200,
+                          height: 200,
+                          color: Colors.grey[300],
+                          child: const Icon(Icons.music_note, size: 100),
+                        );
+                      },
+                    ),
+                  )
+                  : Container(
+                    width: 200,
+                    height: 200,
+                    color: Colors.grey[300],
+                    child: const Icon(Icons.music_note, size: 100),
+                  ),
+        ),
+        const SizedBox(height: 12),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                _selectedAlbum!['albumName'] ?? 'Unknown',
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
+                textAlign: TextAlign.center,
+                softWrap: true,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '${_selectedAlbum!['type']?.isEmpty == true ? 'None' : _selectedAlbum!['type']} - ${_selectedAlbum!['year']} | ${_selectedAlbum!['platform']}',
+                style: const TextStyle(color: Colors.grey),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+        Center(
+          child: IconButton(
+            icon: const Icon(Icons.share),
+            onPressed: () => _shareAlbum(_selectedAlbum!['albumUrl']!),
+          ),
+        ),
+        const SizedBox(height: 16),
+        ..._songs.asMap().entries.map((entry) {
+          final index = entry.key;
+          final song = entry.value;
+          final audioSource = song['audioSource'] as ProgressiveAudioSource;
+          final mediaItem = audioSource.tag as MediaItem;
+          final songId = song['songId'] as String?;
+          return ListTile(
+            title: Text(
+              audioSource.tag.title ?? 'Unknown',
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: Text(song['runtime'] ?? 'Unknown'),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.playlist_add),
+                  tooltip:
+                      songId != null
+                          ? 'Add to Playlist'
+                          : 'Playlist ID unavailable',
+                  onPressed:
+                      songId != null && PreferencesManager.isLoggedIn()
+                          ? () {
+                            debugPrint(
+                              'Opening playlist dialog for song: $song',
+                            );
+                            _showAddToPlaylistDialog(song);
+                          }
+                          : () => ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Please log in or song ID unavailable',
+                              ),
+                            ),
+                          ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.share),
+                  onPressed: () => _shareSong(song),
+                ),
+              ],
+            ),
+            onTap: () {
+              debugPrint('Tapped song at index $index: ${mediaItem.title}');
+              _playAudioSourceAtIndex(index, false);
+            },
+          );
+        }),
+        if (_songState.value.url != null) const SizedBox(height: 70),
+      ],
+    );
+  }
+
+  Future<bool> _onPop() async {
+    if (_isPlayerExpanded) {
+      setState(() {
+        _isPlayerExpanded = false;
+        SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      });
+      return false;
+    }
+    if (_selectedPlaylist != null && _currentNavIndex == 1) {
+      setState(() {
+        _selectedPlaylist = null;
+        _isFavoritesSelected = false;
+      });
+      return false;
+    }
+    if (_selectedAlbum != null && _currentNavIndex == 0) {
+      setState(() {
+        _selectedAlbum = null;
+        _isFavoritesSelected = false;
+      });
+      return false;
+    }
+    if (_currentNavIndex != 0) {
+      setState(() {
+        _currentNavIndex = 0;
+        _selectedAlbum = null;
+        _isFavoritesSelected = false;
+      });
+      return false;
+    }
+    return false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (!didPop) {
+          await _onPop();
+        }
+      },
+      child: Scaffold(
+        appBar:
+            _isPlayerExpanded
+                ? null
+                : AppBar(
+                  title: const Text('KHInsider Search'),
+                  leading:
+                      (_selectedAlbum != null || _selectedPlaylist != null) &&
+                              _currentNavIndex <= 1
+                          ? IconButton(
+                            icon: const Icon(Icons.arrow_back),
+                            onPressed: () {
+                              setState(() {
+                                _selectedAlbum = null;
+                                _selectedPlaylist = null;
+                                _isFavoritesSelected = false;
+                              });
+                            },
+                          )
+                          : null,
+                ),
+        body: Stack(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  if (_currentNavIndex == 0 && _selectedAlbum == null) ...[
+                    TextField(
+                      controller: _searchController,
+                      decoration: const InputDecoration(
+                        labelText: 'Search Albums',
+                        border: OutlineInputBorder(),
+                      ),
+                      onSubmitted: (value) {
+                        setState(() {});
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                  ],
+                  Expanded(
+                    child:
+                        _currentNavIndex == 0
+                            ? (_selectedAlbum == null
+                                ? _buildAlbumList()
+                                : _buildSongList())
+                            : _buildPlaylistsList(),
+                  ),
+                ],
+              ),
+            ),
+            ValueListenableBuilder<SongState>(
+              valueListenable: _songState,
+              builder: (context, songState, child) {
+                if (songState.url != null) {
+                  return Align(
+                    alignment: Alignment.bottomCenter,
+                    child: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 300),
+                      child:
+                          _isPlayerExpanded
+                              ? _buildExpandedPlayer()
+                              : _buildMiniPlayer(),
+                    ),
+                  );
+                }
+                return const SizedBox();
+              },
+            ),
+          ],
+        ),
+        bottomNavigationBar:
+            _isPlayerExpanded
+                ? null
+                : BottomNavigationBar(
+                  currentIndex: _currentNavIndex,
+                  onTap: (index) async {
+                    setState(() {
+                      _currentNavIndex = index;
+                      _selectedAlbum = null;
+                      _selectedPlaylist = null;
+                      _isFavoritesSelected = index == 1;
+                    });
+                    if (index == 1 && PreferencesManager.isLoggedIn()) {
+                      await _loadPlaylists(); // Refresh playlists when selecting playlists tab
+                    } else if (index == 2) {
+                      final result = await Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder:
+                              (context) => SettingsScreen(
+                                onThemeChanged: widget.onThemeChanged,
+                              ),
+                        ),
+                      );
+                      setState(() {
+                        _currentNavIndex = 0;
+                        _selectedAlbum = null;
+                        _selectedPlaylist = null;
+                        _isFavoritesSelected = false;
+                        if (result == 'logout') {
+                          _playlists = [];
+                          _emailController.clear();
+                          _passwordController.clear();
+                        }
+                      });
+                    }
+                  },
+                  items: const [
+                    BottomNavigationBarItem(
+                      icon: Icon(Icons.search),
+                      label: 'Search',
+                    ),
+                    BottomNavigationBarItem(
+                      icon: Icon(
+                        Icons.playlist_play,
+                      ), // Changed from Icons.favorite
+                      label: 'Playlists', // Changed from 'Favorites'
+                    ),
+                    BottomNavigationBarItem(
+                      icon: Icon(Icons.settings),
+                      label: 'Settings',
+                    ),
+                  ],
+                ),
+      ),
+    );
+  }
+}
